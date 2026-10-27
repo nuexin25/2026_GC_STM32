@@ -1,0 +1,21 @@
+# ---- Keil MDK 编译产物（可随时重新生成，不入库）----
+nx_car/MDK-ARM/nx_car/
+nx_car/MDK-ARM/*.log
+nx_car/MDK-ARM/*.lst
+*.uvguix.*
+*.bak
+*.scvd
+
+# ---- 本机工具缓存 / 安装残留 ----
+WitMotion.exe.WebView2/
+/Bin/
+/Plugins/
+/Config/
+/Record*/
+
+# ---- 历史备份目录（本身就是备份，不入库）----
+_backup_*/
+
+# ---- 其它 ----
+__pycache__/
+*.pyc
