@@ -246,18 +246,22 @@ void Mission_OdomZero(void);
 #define MISSION_VEL_API          1
 
 #define MNV_VEL_MMPS             5000.0f  /* 巡航速度 mm/s（★实测 >1100 高速段开始左右画龙） */
-#define MNV_ACC_MMPS2            1200.0f   /* 加减速度 mm/s² */
-#define MNV_CREEP_MMPS           160.0f   /* 减速段最低爬行速度（★太低会"轮子转车不走"） */
+#define MNV_ACC_MMPS2            1600.0f   /* 加减速度 mm/s²（★2026-10-28 二轮提速：1200 -> 1600；
+                                              ★现场串口 VRCFG 的 A= 会覆盖它，要生效就别再发 A= 或发 A=1600） */
+#define MNV_CREEP_MMPS           220.0f   /* 减速段最低爬行速度（★2026-10-28：160 -> 220；
+                                              太低会"轮子转车不走"，太高会冲过点） */
 #define MNV_LAT_MAX_MMPS         300.0f   /* ★横向（横移修正）速度上限：高速全速横移会把车带成蛇形 */
 #define MNV_LAT_DEAD_MM          12.0f    /* ★横向死区（全程生效）：小于它就不横移，别追着微差画龙 */
 #define MNV_LAT_FILT             0.15f    /* ★横向误差低通系数（每 20ms 一拍，≈200ms 时间常数）：
                                              里程计的横向分量在 CAN 拥堵时是噪声（实测 100ms 内
                                              跳 100mm），直接拿去控制就是左右画龙 */
-#define MNV_FINAL_MM             70.0f    /* 末端精定位区长度：区内改用更保守的制动包络 */
-#define MNV_FINAL_ACC_MMPS2      250.0f   /* 末端制动包络 mm/s²（斜走只有两轮出力，
-                                             实际减速能力远小于主包络，用主包络必然冲过点） */
+#define MNV_FINAL_MM             45.0f    /* 末端精定位区长度：区内改用更保守的制动包络
+                                             （★2026-10-28 二轮提速：70 -> 45，缩短爬行段） */
+#define MNV_FINAL_ACC_MMPS2      350.0f   /* 末端制动包络 mm/s²（斜走只有两轮出力，
+                                             实际减速能力远小于主包络，用主包络必然冲过点）
+                                             （★2026-10-28：250 -> 350） */
 #define MNV_CAPTURE_MM           90.0f    /* ★末端捕获区：区内禁止自转 */
-#define MNV_CAPTURE_MMPS         160.0f   /* ★捕获区限速上限（仅作封顶，真正减速走 MNV_TAPER_*） */
+#define MNV_CAPTURE_MMPS         220.0f   /* ★捕获区限速上限（★2026-10-28：160 -> 220，随爬行速度一起抬） */
 #define MNV_TAPER_MM             1000.0f   /* ★末端线性减速起点：从 320mm 开始平滑收速 */
 #define MNV_TAPER_LOW            100.0f   /* ★线性段终点：100mm 内固定爬行速度 */
 #define MNV_TAPER_MMPS           550.0f   /* ★线性段起点速度（硬切会顿一下 -> 横偏突然跳 60mm） */
@@ -291,10 +295,10 @@ void Mission_OdomZero(void);
 
 #define MNV_TURN_KP              3.5f     /* 原地转：位置 P（dps per deg） */
 #define MNV_TURN_KD              0.0f     /* 原地转：角速度阻尼（dps per dps），0=纯 P */
-#define MNV_TURN_MAX_DPS         200.0f   /* 原地转：角速度上限 */
+#define MNV_TURN_MAX_DPS         240.0f   /* 原地转：角速度上限（★2026-10-28 二轮提速：200 -> 240） */
 #define MNV_TURN_ACC_DPS2        1500.0f  /* 原地转：制动包络 */
 #define MNV_TURN_MIN_DPS         10.0f
-#define MNV_TURN_NEAR_DEG        14.0f    /* ★末端减速带：剩余小于它… */
+#define MNV_TURN_NEAR_DEG        10.0f    /* ★末端减速带：剩余小于它…（★2026-10-28：14 -> 10） */
 #define MNV_TURN_NEAR_DPS        25.0f    /* ★…角速度封顶（正/反转对称留余量，实测 -90° 会多冲 3~4°） */
 #define MNV_TURN_LEAD_S          0.0f     /* ⚠延迟补偿已停用：预测到 0 会让指令归零、车卡住不动 */
 #define MNV_ROT_PRE_MS           0U       /* 转向前空转时长（0=不用）。试过 120ms 没改善，保留接口 */

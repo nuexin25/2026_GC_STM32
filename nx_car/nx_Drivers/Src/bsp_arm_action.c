@@ -289,7 +289,11 @@ static const ActFlowStep_t flowTgtPick[] = {
    ⚠ 只用于 STORE BACK，改这里**不影响** TRAY PICK / STORE PLACE（各有自己的数组）。 */
 static const ActFlowStep_t flowSbPick[] = {
     { AJT_GRIP, AS_S2,           0U },                        /* 1 直接抓（S2 夹紧，单独运行） */
-    { AJT_LIFT, AS_FIX_SB_SAFE,  ACT_STEP_PAR },              /* 2 上抬 M6（先动）‖ 3 */
+    { AJT_LIFT, AS_FIX_M6_SAFE,  ACT_STEP_PAR },              /* 2 上抬 M6（先动）‖ 3
+                                                                 ★2026-10-28 用户要求：抬升高度
+                                                                 与转盘区 `flowTrayPickPlace`
+                                                                 第 2 步一致（-1000），不再用
+                                                                 SB 专用的 -6576 */
     { AJT_CLAW, AS_FIX_S1_RET,   ACT_STEP_LATE_START },       /* 3 ★晚 200ms 再回缩（防物料撞车体）；
                                                                  ★不带 PAR：并行链看"前一步"的 PAR，
                                                                  本步不标 -> 第 4 步不进本组 */
@@ -321,7 +325,7 @@ static const ActFlowStep_t flowSbNext[] = {
 
 /* 最后一件收尾：抬到安全高 + 收爪（空爪离作业面，之后底盘才能动车） */
 static const ActFlowStep_t flowSbLast[] = {
-    { AJT_LIFT, AS_FIX_SB_SAFE,  0U },                                 /* 1 抬到安全高 */
+    { AJT_LIFT, AS_FIX_M6_SAFE,  0U },                                 /* 1 抬到安全高（★与转盘区同一值 -1000） */
     { AJT_CLAW, AS_FIX_S1_RET,   0U },                                 /* 2 舵机1 缩回 */
 };
 
@@ -533,6 +537,10 @@ static uint32_t actTurnPendTick = 0U;
    （0 = 没在等）。与上面的 `actTurnPendIdx` 是两套：那套用于**并行组内**待发的 TURN，
    这套用于**单独一步**的 TURN（本组里 TURN 前隔着一步 CAR，组机制打不到）。 */
 static uint32_t actS1GateTick = 0U;
+
+/* ★【2026-10-28 修"抓空"】夹紧步"抓取闸门"的起始时刻（0 = 没在等）：
+   夹紧命令下发前等舵机1（伸缩）后台校验收口，最多 `ACT_GRAB_GATE_MS`。 */
+static uint32_t actGrabGateTick = 0U;
 
 /* ★【2026-10-23】"错开启动"的待发步（`ACT_LATE_NONE` = 没有）：
    `ACT_STEP_LATE_START` 标出的那一步先不发，由 `Act_LateStartKick()` 到点发出。 */
@@ -1424,7 +1432,11 @@ static uint8_t Act_ServoDoneGrip(const ActStep_t *st, uint32_t now)
                         actSrvStallTick = now;
                         return 0U;
                     }
-                    if (cur != actSrvLastPos)
+                    /* ★【2026-10-28】用 `ACT_SRV_STALL_EPS` 死区判"还在动"：
+                       回读 ±1 抖动会一直刷新 stallTick -> 永远判不出停稳 -> 空抓检测失效。 */
+                    d = (int32_t)cur - (int32_t)actSrvLastPos;
+                    if (d < 0) { d = -d; }
+                    if (d > (int32_t)ACT_SRV_STALL_EPS)
                     {
                         actSrvLastPos   = cur;
                         actSrvStallTick = now;
@@ -1457,8 +1469,10 @@ static uint8_t Act_ServoDoneGrip(const ActStep_t *st, uint32_t now)
                 return 0U;
             }
 
-            /* ② 还在动：刷新基准，继续等 */
-            if (cur != actSrvLastPos)
+            /* ② 还在动：刷新基准，继续等（±`ACT_SRV_STALL_EPS` 内算没动，防回读抖动） */
+            d = (int32_t)cur - (int32_t)actSrvLastPos;
+            if (d < 0) { d = -d; }
+            if (d > (int32_t)ACT_SRV_STALL_EPS)
             {
                 actSrvLastPos   = cur;
                 actSrvStallTick = now;
@@ -1528,6 +1542,16 @@ static uint8_t Act_ServoDoneGrip(const ActStep_t *st, uint32_t now)
                       (unsigned int)(actIdx + 1U), (unsigned int)cur,
                       (long)st->param, (unsigned int)havePos,
                       (unsigned int)actSrvRetx, (unsigned int)retxMax);
+            return 0U;
+        }
+
+        /* ★★【2026-10-28 修"抓空"】**夹紧步动过但还没停稳 -> 绝不放行**。
+           以前这里是 `return 1U`（日志就是 `step1 GRIP ok +400 ms`）：夹爪从 950 往 500
+           走要 600ms 以上，400ms 时回读还在 727/868 就被放行，M6 立刻抬臂 -> 夹空。
+           现在继续等：真停稳 -> 上面判"夹到 / 空抓"；等够 `ACT_GRIP_CLOSE_MAX_MS`
+           -> 张开重夹（带 M6 下降找料）。 */
+        if ((isClose != 0U) && (havePos != 0U) && (actSrvMoved != 0U))
+        {
             return 0U;
         }
 
@@ -3288,6 +3312,31 @@ void ArmAct_Update(void)
             actS1GateTick = 0U;
         }
 
+#if (ACT_SERVO_OPEN_LOOP != 0U)
+        /* ★★【2026-10-28 修"抓空"】**抓取闸门**：夹紧步下发前，先等舵机1（伸缩）
+           的**上一条命令真正到位**（后台校验 `pending` 收口 = 回读已进 LOOSE_TOL 或已放弃）。
+           现场：`TTPREP2` 的 S1 243→898 被 120ms 提前放行，紧接着 `TRAYPICK` 第 1 步
+           就发夹紧，此时爪子只伸到 797 —— 夹爪在物料**前面**闭合 = 抓空。
+           兜底 `ACT_GRAB_GATE_MS`(900ms)：读不到 / 校验放弃就照发，绝不卡死。 */
+        if ((st->joint == AJT_GRIP) && (st->param < (int32_t)ACT_S2_OPEN_MIN) &&
+            (actSrvVerify[Act_SrvVerifyIdx((uint8_t)SERVO_ID_CLAW)].pending != 0U))
+        {
+            if (actGrabGateTick == 0U)
+            {
+                actGrabGateTick = now;
+                Debug_Log("ACT", "step%u GRIP gated: wait S1 arrive before close",
+                          (unsigned int)(actIdx + 1U));
+            }
+            if ((now - actGrabGateTick) < (uint32_t)ACT_GRAB_GATE_MS)
+            {
+                return;
+            }
+            Debug_Log("ACT", "step%u GRIP gate timeout %ums -> close anyway",
+                      (unsigned int)(actIdx + 1U),
+                      (unsigned int)(now - actGrabGateTick));
+        }
+        actGrabGateTick = 0U;
+#endif
         /* 电机步：先确保"当前位置"可读，否则 Arm_MoveAbsDir 会拒绝下发
            （表现就是"命令发了、电机一点都不动"）。舵机不需要位置。 */
         if (((st->joint == AJT_TURN) || (st->joint == AJT_LIFT)) &&

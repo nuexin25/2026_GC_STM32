@@ -89,45 +89,45 @@ static const ArmJointStep_t armSteps_HOME[] = {
 	ARM_J(AJ_TURN, 642),			/* 2：电机5 转到1号位 */
 	ARM_J(AJ_CLAW, 249),      /* 3：舵机1 伸到1号位 */
 	ARM_J(AJ_LIFT, -17000),   /* 4：电机6 降到1号位 */
-	ARM_J(AJ_GRIP, 100),      /* 5：舵机2 抓紧 */
+	ARM_J(AJ_GRIP, 500),      /* 5：舵机2 抓紧（机械限位 = 500） */
  	ARM_J(AJ_LIFT, -3000),    /* 6：电机6 抬高 */
 	ARM_J(AJ_CLAW, 70),      /* 3：舵机1 伸到1号位 */
 	ARM_J(AJ_TURN, 1940),			/* 7：电机5 转到放置2 */
 	ARM_J(AJ_CLAW, 67),      /* 8：舵机1 伸出放置2 */
 	ARM_J(AJ_LIFT, -28446),   /* 9：电机6 下降 */
-	ARM_J(AJ_GRIP, 500),      /* 10：舵机2 松开 */
+	ARM_J(AJ_GRIP, 600),      /* 10：舵机2 松开（>500 才算张开） */
 	ARM_J(AJ_LIFT, -3000),    /* 6：电机6 抬高 */
 	ARM_J(AJ_TURN, 0),			/* 2：电机5 转到1号位 */
 };
 
 /* 动作 PICK：取料示例（参数待实测填写，先用小值试） */
 static const ArmJointStep_t armSteps_PICK[] = {
-  ARM_J(AJ_GRIP, 500),      /* 1：舵机2 松开 */
+  ARM_J(AJ_GRIP, 600),      /* 1：舵机2 松开（>500 才算张开） */
 	ARM_J(AJ_TURN, -551),			/* 2：电机5 转到2号位 */
 	ARM_J(AJ_CLAW, 573),      /* 3：舵机1 伸到2号位 */
 	ARM_J(AJ_LIFT, -16100),   /* 4：电机6 降到2号位 */
-	ARM_J(AJ_GRIP, 100),      /* 5：舵机2 抓紧 */
+	ARM_J(AJ_GRIP, 500),      /* 5：舵机2 抓紧（机械限位 = 500） */
  	ARM_J(AJ_LIFT, -3000),    /* 6：电机6 抬高 */
 	ARM_J(AJ_TURN, 595),			/* 7：电机5 转到放置1 */
 	ARM_J(AJ_CLAW, 238),      /* 8：舵机1 伸出放置1 */
 	ARM_J(AJ_LIFT, -62646),   /* 9：电机6 下降 */
-	ARM_J(AJ_GRIP, 500),      /* 10：舵机2 松开 */
+	ARM_J(AJ_GRIP, 600),      /* 10：舵机2 松开（>500 才算张开） */
 	ARM_J(AJ_LIFT, -3000),    /* 6：电机6 抬高 */
 	ARM_J(AJ_TURN, 0),			/* 2：电机5 转到1号位 */
 };
 
 /* 动作 PLACE：放置示例 */
 static const ArmJointStep_t armSteps_PLACE[] = {
-  ARM_J(AJ_GRIP, 500),      /* 1：舵机2 松开 */
+  ARM_J(AJ_GRIP, 600),      /* 1：舵机2 松开（>500 才算张开） */
 	ARM_J(AJ_TURN, 2405),			/* 2：电机5 转到3号位 */
 	ARM_J(AJ_CLAW, 398),      /* 3：舵机1 伸到3位 */
 	ARM_J(AJ_LIFT, -16100),   /* 4：电机6 降到3号位 */
-	ARM_J(AJ_GRIP, 100),      /* 5：舵机2 抓紧 */
+	ARM_J(AJ_GRIP, 500),      /* 5：舵机2 抓紧（机械限位 = 500） */
  	ARM_J(AJ_LIFT, -3000),    /* 6：电机6 抬高 */
 	ARM_J(AJ_TURN, 1482),			/* 7：电机5 转到放置3 */
 	ARM_J(AJ_CLAW, 215),      /* 8：舵机1 伸出放置3 */
 	ARM_J(AJ_LIFT, -62646),   /* 9：电机6 下降 */
-	ARM_J(AJ_GRIP, 500),      /* 10：舵机2 松开 */
+	ARM_J(AJ_GRIP, 600),      /* 10：舵机2 松开（>500 才算张开） */
 	ARM_J(AJ_LIFT, -3000),    /* 6：电机6 抬高 */
 	ARM_J(AJ_TURN, 0),			/* 2：电机5 转到1号位 */
 };
@@ -137,16 +137,16 @@ static const ArmJointStep_t armSteps_PLACE[] = {
    没有对应数组会编译报错 "identifier armSteps_MYACT is undefined"。
    不需要这个动作时：把本数组 + ARM_ACTION_TABLE 里那行一起删掉即可。 */
 static const ArmJointStep_t armSteps_MYACT[] = {
-   ARM_J(AJ_GRIP, 500),      /* 1：舵机2 松开 */
+   ARM_J(AJ_GRIP, 600),      /* 1：舵机2 松开（>500 才算张开） */
 	ARM_J(AJ_CLAW, 339),      /* 2：舵机1 伸出放置2 */
 	ARM_J(AJ_TURN, 836),			/* 3：电机5 转到放置2 */
 	ARM_J(AJ_LIFT, -28883),   /* 4：电机6 下降 */
-	ARM_J(AJ_GRIP, 100),      /* 5：舵机2 抓紧 */
+	ARM_J(AJ_GRIP, 500),      /* 5：舵机2 抓紧（机械限位 = 500） */
 	ARM_J(AJ_LIFT, -3000),    /* 6：电机6 抬高 */
 	ARM_J(AJ_TURN, -295),			/* 7：电机5 转到1号位 */
 	ARM_J(AJ_CLAW, 164),      /* 8：舵机1 伸到1号位 */
 	ARM_J(AJ_LIFT, -16100),   /* 9：电机6 降到1号位 */
-	ARM_J(AJ_GRIP, 500),      /* 10：舵机2 松开 */
+	ARM_J(AJ_GRIP, 600),      /* 10：舵机2 松开（>500 才算张开） */
 	ARM_J(AJ_LIFT, -3000),    /* 11：电机6 抬高 */
 	ARM_J(AJ_TURN, 0),			/*12：电机5 转到1号位 */
 };

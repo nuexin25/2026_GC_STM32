@@ -43,9 +43,10 @@ static uint8_t  imuOnline = 0;                /* ���߱�־��0=���
 static uint8_t  imuDebugRaw = IMU_DEBUG_RAW;  /* ԭʼ֡��ӡ����ʱ���� */
 static uint32_t imuLastFrameTick = 0;         /* ���һ����Ч֡ʱ��� */
 static uint32_t imuLastReportTick = 0;
+static uint32_t imuCurBaud = HWT101CT_UART_BAUD;  /* baud USART2 is actually running at right now */
 static uint8_t  imuTestSampleCnt = 0;      /* IMU �Լ��Ѳ������� */
 static uint32_t imuTestStartTick = 0;      /* IMU �Լ���ʼʱ��� */
-static uint32_t imuTestLastSampleTick = 0; /* IMU �Լ��ϴβ���ʱ��� */        /* ���һ���ϱ�ʱ��� */
+static uint32_t imuTestLastSampleTick = 0; /* IMU self-test last sample tick */
 
 /* ===================== HAL �ص������������壩 ===================== */
 
@@ -165,6 +166,20 @@ static uint32_t IMU_ProbeFrames(uint16_t ms)
  *         HAL_Delay inside, so this is called ONCE from IMU_Init (boot), never in
  *         the main loop. On failure the module keeps its old rate (no harm).
  */
+/* A register write blocks inside HAL_UART_Transmit, which holds the HAL lock:
+   an RX completion in that window cannot re-arm the RX IT and reception would
+   stall for good (a 5-byte write lasts ~5ms at 9600, i.e. several frames).
+   So keep the RX IT off across the write and re-arm it right after. */
+static HAL_StatusTypeDef IMU_WriteOutputRate(HWT101CT_OutputRate_t r)
+{
+    HAL_StatusTypeDef st;
+
+    (void)HAL_UART_AbortReceive(&huart2);
+    st = HWT101CT_SetOutputRate(&imuDev, r);
+    (void)HAL_UART_Receive_IT(&huart2, &imuRxByte, 1);
+    return st;
+}
+
 static void IMU_CfgOutputRate(void)
 {
     HWT101CT_OutputRate_t r;
@@ -175,7 +190,7 @@ static void IMU_CfgOutputRate(void)
     else if (IMU_CFG_RATE_HZ == 100U){ r = HWT101CT_RRATE_100HZ; }
     else                             { r = HWT101CT_RRATE_20HZ;  }
 
-    if (HWT101CT_SetOutputRate(&imuDev, r) != HAL_OK)
+    if (IMU_WriteOutputRate(r) != HAL_OK)
     {
         Debug_Log("IMU", "out rate set FAIL, keep old rate");
         return;
@@ -213,7 +228,7 @@ static void IMU_CfgOutputRate(void)
     }
 
     /* Fall back to IMU_CFG_RATE_FALLBACK_HZ (safe), do not probe again */
-    if (HWT101CT_SetOutputRate(&imuDev, HWT101CT_RRATE_20HZ) == HAL_OK)
+    if (IMU_WriteOutputRate(HWT101CT_RRATE_20HZ) == HAL_OK)
     {
         imuCfgRateHz = (uint8_t)IMU_CFG_RATE_FALLBACK_HZ;
     }
@@ -226,6 +241,88 @@ static void IMU_CfgOutputRate(void)
 }
 #endif /* IMU_CFG_RATE_HZ != 0 */
 
+/* ============ USART2 baud auto-detect / restore ============================
+ * The module stores its baud rate in flash. If it is ever put back to the
+ * factory 9600 (WitMotion PC tool, factory reset, ...) while this firmware
+ * expects HWT101CT_UART_BAUD, every received byte becomes a framing error and
+ * no frame ever validates -> yaw stays 0 and err climbs at the byte rate.
+ * At boot we therefore listen at HWT101CT_UART_BAUD first (normal case, costs
+ * one probe window); if nothing validates we try 9600 and, when the module
+ * answers there, write HWT101CT_UART_BAUD back into it and follow it up.
+ * Register writes are issued with RX aborted: HAL_UART_Transmit holds the HAL
+ * lock, and an RX completion during that window cannot re-arm the RX IT.
+ */
+/* Re-open USART2 at `baud` with the RX interrupt re-armed. Non-blocking: no delay,
+   so it is safe to call from IMU_Update() while the main loop is running. */
+static void IMU_Reopen(uint32_t baud)
+{
+    (void)HAL_UART_AbortReceive(&huart2);
+    huart2.Init.BaudRate = baud;
+    (void)HAL_UART_Init(&huart2);
+    imuDev.rx_index    = 0U;
+    imuDev.rx_state    = HWT101CT_RX_IDLE;
+    imuDev.frame_ready = false;
+    (void)HAL_UART_Receive_IT(&huart2, &imuRxByte, 1);
+    imuCurBaud = baud;
+}
+
+static uint32_t IMU_CountFrames(uint32_t baud, uint16_t ms)
+{
+    uint32_t cnt = 0U;
+    uint32_t t0;
+
+    IMU_Reopen(baud);
+
+    t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < (uint32_t)ms)
+    {
+        if (imuDev.frame_ready)
+        {
+            if (HWT101CT_ParseFrame(&imuDev)) { cnt++; }
+        }
+        HAL_Delay(1);
+    }
+
+    return cnt;
+}
+
+static void IMU_AutoBaud(void)
+{
+    if (IMU_CountFrames(HWT101CT_UART_BAUD, 100U) > 0U)
+    {
+        return;                                     /* normal case */
+    }
+
+    Debug_Log("IMU", "no frame at %lu, probing 9600", (unsigned long)HWT101CT_UART_BAUD);
+
+    if (IMU_CountFrames(9600U, 200U) == 0U)
+    {
+        Debug_Log("IMU", "no frame at 9600 either, check wiring/power");
+
+        /* Nothing answered in either probe window (typical when the module powers up
+           slower than the MCU): go back to the EXPECTED rate instead of staying at 9600.
+           2026-10-28 field log: staying at 9600 left USART2 at 9600 while the module was
+           already talking at 115200 -> every byte became a framing error, err climbed
+           forever and yaw stayed 0.0 (g=0 a=0). Never fall back to 9600 unless the
+           module actually answers there (the branch below). */
+        (void)IMU_CountFrames(HWT101CT_UART_BAUD, 20U);
+    }
+    else
+    {
+        (void)HAL_UART_AbortReceive(&huart2);       /* keep RX IT off during TX */
+        IMU_SetBaudRate();                          /* writes HWT101CT_UART_BAUD + reopens USART2 */
+        HAL_Delay(300);                             /* let the module apply + save */
+
+        if (IMU_CountFrames(HWT101CT_UART_BAUD, 200U) > 0U)
+        {
+            Debug_Log("IMU", "module baud restored to %lu", (unsigned long)HWT101CT_UART_BAUD);
+            return;
+        }
+        Debug_Log("IMU", "baud restore failed, staying at 9600");
+    }
+}
+/* ======================= end baud auto-detect ======================= */
+
 void IMU_Init(void)
 {
     /* ��ͳһ�긲�� USART2 �����ʲ����䣨HAL_UART_Init ������ MspInit�� */
@@ -234,6 +331,9 @@ void IMU_Init(void)
 
     /* ��ʼ�� HWT101CT ��� */
     HWT101CT_Init(&imuDev, &huart2);
+
+    /* Detect the baud the module is really running at; restore HWT101CT_UART_BAUD if needed */
+    IMU_AutoBaud();
 
     /* ��¼��ʼ���ģ���ʼΪ���� */
     imuLastFrameTick = HAL_GetTick();
@@ -247,8 +347,9 @@ void IMU_Init(void)
 #if (IMU_CFG_RATE_HZ != 0U)
     /* Set the module auto-report rate once at boot (English comments only here) */
     IMU_CfgOutputRate();
-    Debug_Log("IMU", "init, baud=%lu rate=%uHz",
-              (unsigned long)HWT101CT_UART_BAUD, (unsigned int)imuCfgRateHz);
+    Debug_Log("IMU", "init, baud=%lu actual=%lu rate=%uHz",
+              (unsigned long)HWT101CT_UART_BAUD, (unsigned long)imuCurBaud,
+              (unsigned int)imuCfgRateHz);
 #else
     /* Rate is configured on the module itself (user: 115200 + 1000Hz).
        1000Hz x 11B x 10bit = 110kbps ~= 95% of 115200; if frames drop, use
@@ -322,7 +423,8 @@ void IMU_Update(void)
         Debug_Log("IMU", "yaw=%ld.%lu gz=%ld.%lu err=%lu g=%lu a=%lu yc=%lu",
                   (long)yaw_i, (unsigned long)yaw_f,
                   (long)gz_i, (unsigned long)gz_f,
-                  (unsigned long)imuErrCnt, (unsigned long)imuCntGyro,
+                  (unsigned long)imuErrCnt,
+                  (unsigned long)imuCntGyro,
                   (unsigned long)imuCntAngle, (unsigned long)imuCntYawChg);
 
         /* OLED ˢ�� yaw��PAGE_DATA ҳ yaw ռλ��gz ���� OLED �ӿڣ����� P7 ��չ�� */

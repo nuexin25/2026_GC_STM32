@@ -78,8 +78,7 @@ static const VrStep_t vrSteps[] =
     { VR_GO,  1900, -1042,    0, 0, "B1 T-IN" },
     { VR_TASK,   0,     0,    0, VR_TASK_PICK_B1, "B1 PICK" },
 
-    /* 第一批：暂存区放 3 件 */
-    { VR_GO,  1900,  -1042,    0, 0, "B1 R-BK" },
+    /* 第一批：暂存区放 3 件（原来这里有一段零距离 GO，已删） */
     { VR_ROT,    0,      0,  180, 0, "B1 R-90" },
     { VR_GO,   250,  -1042,    0, 0, "B1 RGH"  },
     { VR_ROT,    0,     0,    -90,   0, "B1 R-180" },
@@ -110,8 +109,7 @@ static const VrStep_t vrSteps[] =
     { VR_GO,  1042, -1907,    0, 0, "B2 TST2" },
     { VR_TASK,   0,     0,    0, VR_TASK_STACK_B2, "B2 STACK" },
 
-    /* 返程 */
-    { VR_GO,  1042,  -1907,   0, 0, "B2 BACK" },
+    /* 返程（原来这里有一段零距离 GO，已删） */
     { VR_GO,   250,  -1907,    0, 0, "B2 STO"  },
 		{ VR_ROT,    0,     0,    90, 0, "B2 S-R0" },
 
@@ -131,8 +129,11 @@ static const VrStep_t vrSteps[] =
      - 下一步 GO：方向基本一致 -> 全速直连；拐角明显 -> 降速直连（中途不停车）
                   原路折返 -> 必须停稳（四轮瞬间反向会打滑）
    百分比是"相对运行期巡航速度"（VRCFG 的 V），改了 V 这里自动跟着变。 */
-#define VR_APPROACH_PCT   55      /* 进点（下一步 ROT/TASK）前一段的巡航速度百分比 */
-#define VR_CORNER_PCT     65      /* 拐弯段（下一步 GO 且转角明显）的巡航速度百分比 */
+#define VR_APPROACH_PCT   92      /* 进点（下一步 ROT/TASK）前一段的巡航速度百分比
+                                     ★2026-10-28 二轮提速：80 -> 92（段末本来就要停稳，
+                                       降速只影响"到点前的最后一段"，全速收尾更快） */
+#define VR_CORNER_PCT     88      /* 拐弯段（下一步 GO 且转角明显）的巡航速度百分比
+                                     ★2026-10-28 二轮提速：80 -> 88（拐角只是降速直连，不停车） */
 #define VR_CORNER_DEG     35.0f   /* 转角小于它 = 直行，全速通过 */
 #define VR_REVERSE_DEG    150.0f  /* 转角大于它 = 原路折返，必须停稳 */
 
@@ -242,6 +243,7 @@ static VrState_t vrState  = VR_IDLE;
 static uint8_t   vrIdx    = 0U;      /* 当前步 0..VR_COUNT-1 */
 static uint8_t   vrAuto   = 1U;      /* 1=AUTO 连跑，0=STEP 单步 */
 static uint32_t  vrTick   = 0U;      /* 本步开始时刻（超时用） */
+static uint32_t  vrTotalMs = 0U;     /* 本轮整圈累计耗时（步耗时日志用） */
 static uint16_t  vrTeleMs = 0U;      /* 遥测周期 ms（0=关闭） */
 static uint32_t  vrTeleTick = 0U;
 static uint8_t   vrTestRot = 0U;     /* 1 = 当前在跑"单次转向整定" */
@@ -276,6 +278,7 @@ static void Vr_Start(void)
     Mission_VelStop();                  /* 清内核状态，保证从"新的一段"开始 */
     vrState = VR_RUN;
     vrTick  = HAL_GetTick();
+    vrTotalMs = 0U;
 
     Debug_Log("VR", "start %u/%u %s mode=%s",
               (unsigned int)(vrIdx + 1U), (unsigned int)VR_COUNT,
@@ -395,7 +398,12 @@ void VelRoute_Update(void)
 
     if (done != 0U)
     {
-        Debug_Log("VR", "step%u %s ok", (unsigned int)(vrIdx + 1U), vrSteps[vrIdx].name);
+        uint32_t dt = now - vrTick;     /* ★本段耗时（整圈提速定量用） */
+
+        vrTotalMs += dt;
+        Debug_Log("VR", "step%u %s ok t=%ums tot=%ums",
+                  (unsigned int)(vrIdx + 1U), vrSteps[vrIdx].name,
+                  (unsigned int)dt, (unsigned int)vrTotalMs);
 
         vrIdx++;
         vrTick = now;
@@ -412,7 +420,8 @@ void VelRoute_Update(void)
         {
             Mission_VelStop();
             vrState = VR_ALLDONE;
-            Debug_Log("VR", "all done (%u steps)", (unsigned int)VR_COUNT);
+            Debug_Log("VR", "all done (%u steps) total=%ums",
+                      (unsigned int)VR_COUNT, (unsigned int)vrTotalMs);
             Vr_Refresh();
             return;
         }

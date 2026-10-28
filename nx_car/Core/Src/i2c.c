@@ -39,7 +39,9 @@ void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 100000;
+  /* ★2026-10-28 整圈提速：I2C1 只挂 OLED，100k -> 400k（整页重绘 96ms -> ~25ms，
+     全圈 35 次刷页可省 ~2.5s）。若现场花屏/偶尔不刷，改回 100000 即可。 */
+  hi2c1.Init.ClockSpeed = 400000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
