@@ -305,7 +305,12 @@ void Mission_OdomZero(void);
 #define MNV_TURN_ARRIVE_DPS      25.0f    /* ★15 太严：0.1° 量化的实测角速度在 15 附近抖，
                                              到位判定被反复打断，尾段白等 0.6s */
 #define MNV_TURN_TOL_DEG         1.0f
-#define MNV_ROT_RECHECK_DEG      1.5f     /* ★到位后按里程计复核：残差大于它才补转（治"IMU 转够了、物理少 2~3°"） */
+#define MNV_ROT_RECHECK_DEG      3.0f     /* ★兜底补转阈值：小于它就不补转（正常情况下末端混合已把它压到 1° 内） */
+#define MNV_ROT_CHAIN_SKIP_DEG   2.0f     /* ★chain=1（段间不停顿）时的"免转"阈值：已经在这以内就直接过，
+                                              不为 1° 去停一次车（残余由下一段弧线/航向闭环收掉） */
+#define MNV_ROT_FIX_BLEND        0.25f    /* ★末端（最后 MNV_TURN_NEAR_DEG 内）用**里程计残差**修正
+                                             IMU 目标的每拍混合系数：一次扫到位，不再"落地后再补转一小段"
+                                             （IMU 零漂 -> "IMU 转够了、物理少 2~3°"） */
 #define MNV_TURN_HOLD_MS         40U
 #define MNV_WZ_SLEW_DPS2         800.0f   /* 转向指令斜率限制 */
 
@@ -314,14 +319,23 @@ void Mission_OdomZero(void);
 /* ★斜向直连（2026-10-26）：GO 不再拆两条正交腿（L 形），段首把目标换算到车身系后
    **一条直线**走完（f,l 合成方向），到段末速度方向不再突变成 90°。 */
 
-/* ★边走边转（2026-10-26）：GO 段里就把"下一步 ROT 的朝向"转过去，到点时车头已对准，
-   ROT 退化成"末端几度精修"。原地不动只转的段反而最费时间，这一项省的就是它。 */
-#define MNV_ARC_TURN_EN          0        /* 1=开 0=关（关掉退回"先直行、再原地转"的老行为） */
+/* ★边走边转（2026-10-26，★2026-10-29 改成"只转段末最后一段"）：
+   GO 段**最后 MNV_ARC_WIN_MM 内**才把车头转到下一步 ROT 的朝向，到点时朝向已对准，
+   ROT 只剩末端几度精修；段末不再停车、不再补发 0 速度、不再留 20ms 空档
+   -> 直角弯"带速过弯 + 一步到位 + 直接跑下一段"。
+   ★窗口之外的整段仍然笔直：Mnv_Go 的世界系 phi 补偿保证车身转动时轨迹不变，
+     转动量被压缩到最后一点点，跑偏累积比"全程慢慢扭"小一个量级。
+   转角小于 MNV_ARC_MIN_DEG 或段长小于 MNV_ARC_MIN_MM 时不走弧线，留给 ROT。 */
+#define MNV_ARC_TURN_EN          1        /* 1=开 0=关（关掉退回"先直行、再原地转"的老行为） */
 #define MNV_ARC_KP               2.2f     /* 弧线航向 P（dps per deg）：偏了就多转一点 */
 #define MNV_ARC_KD               0.6f     /* 弧线航向 D（阻尼）：压住甩头 */
-#define MNV_ARC_YMX_DPS          90.0f    /* ★弧线角速度上限：越大转得越"甩"，横移分量越大 */
+#define MNV_ARC_YMX_DPS          150.0f   /* ★弧线角速度上限 dps：窗口内要转完 90°，太小会转不完 */
 #define MNV_ARC_MIN_DEG          5.0f     /* 转角小于它不走弧线（留给 ROT，免得来回修） */
 #define MNV_ARC_MIN_MM           400.0f   /* ★段长小于它不走弧线（太短转不过来，前馈会爆） */
+#define MNV_ARC_WIN_MM           700.0f   /* ★弧线窗口 mm：只在最后这么长内转（前段全速走直线）
+                                             （改大 = 转得更平缓、但跑偏累积更久；改小 = 转得更急） */
+#define MNV_ARC_FIX_MM           250.0f   /* ★窗口末段 mm：把航向参考按里程计绝对朝向收口，
+                                             补掉 IMU 零漂造成的"少转 2~3°"，到点即真值（ROT 不用再补） */
 
 /**
  * @brief  单段导航：走到**绝对里程计坐标** (x, y)（与 ODOM 清零后的坐标系一致）
@@ -371,6 +385,14 @@ int32_t Mission_VelGetCruise(void);
 
 /** @brief 速度模式：原地转到绝对朝向 deg（相对出发点，逆时针正）；1=已到位 */
 uint8_t Mission_VelRot(float deg);
+
+/**
+ * @brief  速度模式：原地转到绝对朝向 deg，并指定"到位后是否停车"
+ * @param  chain: 1 = 到位后**不补发 0 速度**，直接返回（下一段 GO 马上接手，段间不停顿）
+ *                0 = 到位后补发 0 速度停稳（下一段是机械臂作业时必须用 0）
+ * @retval 1=已到位；0=进行中
+ */
+uint8_t Mission_VelRotEx(float deg, uint8_t chain);
 
 /** @brief 速度模式：立即停车（0 速度 + 复位内核状态），用于急停/退出/超时 */
 void Mission_VelStop(void);

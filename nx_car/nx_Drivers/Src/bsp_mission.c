@@ -1537,6 +1537,8 @@ static float    mnvLegTravel= 0.0f;   /* 本段已走 mm（速度×时间开环�
 static float    mnvOdomYaw0 = 0.0f;   /* ★段首里程计朝向 deg：算"车头已经把行驶方向带偏多少" */
 static float    mnvYawC0    = 0.0f;   /* ★段首连续航向 deg：弧线转向的航向参考起点 */
 static float    mnvTurnTot  = 0.0f;   /* ★本段要转的总角度 deg（0=不转，走直行航向保持） */
+static float    mnvTurnAbs  = 0.0f;   /* ★本段转完后的**绝对朝向** deg（弧线末段对齐里程计用） */
+static float    mnvArcWin   = 0.0f;   /* ★弧线窗口长度 mm：转角只在"剩余 ≤ 它"的最后一段里完成 */
 static float    mnvSpeed    = 0.0f;
 static float    mnvSegVel   = 0.0f;   /* ★本段巡航速度上限 mm/s（0=用运行期 mnvP_Vel） */
 static uint8_t  mnvSegChain = 0U;     /* ★1=段末不停车（爬行速度直接交给下一段，拐弯/直行衔接用） */
@@ -1696,7 +1698,10 @@ static uint8_t Mnv_Go(int32_t x, int32_t y, int32_t cap, uint8_t chain,
         mnvStopping  = 0U;
         mnvOn        = 1U;
         mnvKind      = 0U;
-        mnvSpeed     = 0.0f;
+        /* ★段间带速衔接：上一段是 chain（不停车）交过来的，就从那个速度接着跑；
+           否则（停车/TASK 之后）才从 0 起步。原来一律归零重爬，
+           现场看到的就是"过完弯到下一路段先顿一下再加速"。 */
+        mnvSpeed     = (mnvSegChain != 0U) ? mnvSpeed : 0.0f;
         /* ★本段规划量：段首锁存，段中不变 */
         mnvSegVel    = (cap > 0) ? (float)cap : 0.0f;
         mnvSegChain  = (chain != 0U) ? 1U : 0U;
@@ -1705,7 +1710,9 @@ static uint8_t Mnv_Go(int32_t x, int32_t y, int32_t cap, uint8_t chain,
         mnvYawRef    = IMU_GetYaw();
         mnvYawRaw    = mnvYawRef;
         mnvCtrl      = now;
-        mnvTick      = now;
+        /* ★段首**立刻**跑一拍控制：原来 mnvTick=now 要白等 20ms 才发第一条命令，
+           段间衔接时车还在按上一段的指令走 -> 现场感觉"到点顿一下"。 */
+        mnvTick      = now - (uint32_t)MNV_TICK_MS;
         mnvOkTick    = 0U;
         mnvLegTravel = 0.0f;
         mnvTeleLat   = 0;
@@ -1714,6 +1721,8 @@ static uint8_t Mnv_Go(int32_t x, int32_t y, int32_t cap, uint8_t chain,
         mnvOdomYaw0 = Chassis_GetOdomYawTrue();
         mnvYawC0    = mnvYawCont;
         mnvTurnTot  = 0.0f;
+        mnvTurnAbs  = 0.0f;
+        mnvArcWin   = 0.0f;
 
         if ((turn_on != 0U) && (MNV_ARC_TURN_EN != 0) && (mnvLegDist >= MNV_ARC_MIN_MM))
         {
@@ -1721,10 +1730,12 @@ static uint8_t Mnv_Go(int32_t x, int32_t y, int32_t cap, uint8_t chain,
 
             if ((d > MNV_ARC_MIN_DEG) || (d < -MNV_ARC_MIN_DEG))
             {
-                mnvTurnTot  = d;
-                /* ★弧线收尾必须停稳：ROT 已对准时会**直接返回 1、不补发 0 速度**，
-                   若这里还 chain，上一段的爬行速度会一直留在驱动器里 */
-                mnvSegChain = 0U;
+                mnvTurnTot = d;
+                mnvTurnAbs = (float)turn_deg;
+                /* ★只转段末最后 MNV_ARC_WIN_MM：前段全速笔直走，转动量压在最后一点点，
+                   世界系轨迹（phi 补偿）不会被"全程慢慢扭"放大成跑偏。 */
+                mnvArcWin  = (mnvLegDist > MNV_ARC_WIN_MM) ? MNV_ARC_WIN_MM : mnvLegDist;
+                /* ★到点时车头已对准，ROT 只做几度精修 -> 段末**不停车**，直接接下一段 */
             }
         }
 
@@ -1809,16 +1820,41 @@ static uint8_t Mnv_Go(int32_t x, int32_t y, int32_t cap, uint8_t chain,
 
         if (mnvTurnTot != 0.0f)
         {
-            /* ★边走边转：航向参考按"已走比例"线性推进（与开环积分严格同步）
-               ref  = 起点 + 总转角 × 已走比例
-               ff   = 总转角 × (速度/段长)  <- 等速段的理论角速度，抵消"追参考"的稳态滞后
+            /* ★边走边转（只转段末窗口）：航向参考按"窗口内已走比例"线性推进
+               p    = (窗口长 − 剩余) / 窗口长   （窗口外 p=0 -> 车头一直守住段首朝向）
+               ref  = 起点 + 总转角 × p
+               ff   = 总转角 × (速度/窗口长)  <- 窗口内的理论角速度，抵消"追参考"的稳态滞后
                P/D 只修扰动（打滑、加减速段） */
-            float p   = mnvLegTravel / mnvLegDist;
-            float ref = mnvYawC0 + (mnvTurnTot * p);
-            float err = Mnv_Wrap(ref - mnvYawCont);
-            float ff  = mnvTurnTot * (mnvSpeed / mnvLegDist);
+            float ref;
+            float err;
+            float ff = 0.0f;
 
-            wz = (MNV_ARC_KP * err) - (MNV_ARC_KD * mnvRate) + ff;
+            if (remain < mnvArcWin)
+            {
+                float p = (mnvArcWin - remain) / mnvArcWin;
+
+                if (p > 1.0f) { p = 1.0f; }
+                ref = mnvYawC0 + (mnvTurnTot * p);
+                ff  = mnvTurnTot * (mnvSpeed / mnvArcWin);
+
+                /* ★到点前把参考"贴"到里程计绝对朝向：IMU 零漂会让"IMU 说转够了"
+                   物理还差 2~3°，若留给 ROT 补就是"停一下再微调一下"。趁还有速度，
+                   在最后 MNV_ARC_FIX_MM 内按剩余里程加权把它一次扫平 -> 到点即真值。 */
+                if (remain < MNV_ARC_FIX_MM)
+                {
+                    float w  = 1.0f - (remain / MNV_ARC_FIX_MM);
+                    float ro = mnvYawCont + Mnv_Wrap(mnvTurnAbs - Chassis_GetOdomYaw());
+
+                    ref += (ro - ref) * w;
+                }
+            }
+            else
+            {
+                ref = mnvYawC0;
+            }
+
+            err = Mnv_Wrap(ref - mnvYawCont);
+            wz  = (MNV_ARC_KP * err) - (MNV_ARC_KD * mnvRate) + ff;
 
             if (wz > MNV_ARC_YMX_DPS)       { wz =  MNV_ARC_YMX_DPS; }
             else if (wz < -MNV_ARC_YMX_DPS) { wz = -MNV_ARC_YMX_DPS; }
@@ -1850,9 +1886,11 @@ static uint8_t Mnv_Go(int32_t x, int32_t y, int32_t cap, uint8_t chain,
 
 /**
  * @brief  速度模式：原地转到绝对朝向 deg（相对出发点，逆时针为正）
+ * @param  chain: 1=到位后**不补发 0 速度**，直接返回（下一段马上接手，段间不停顿）；
+ *                0=到位后 Mnv_Stop 补发 0 速度停稳（下一段是机械臂作业时必须用 0）
  * @retval 1=已到位；0=进行中
  */
-static uint8_t Mnv_Rot(float deg)
+static uint8_t Mnv_Rot(float deg, uint8_t chain)
 {
     uint32_t now = HAL_GetTick();
     float    yaw;
@@ -1870,7 +1908,7 @@ static uint8_t Mnv_Rot(float deg)
         mnvWz     = 0.0f;
         mnvYawRaw = IMU_GetYaw();
         mnvCtrl   = now;
-        mnvTick   = now;
+        mnvTick   = now - (uint32_t)MNV_TICK_MS;    /* 段首立刻发第一条转向命令（不留空档） */
         mnvRotTick = now;
         mnvOkTick = 0U;
         mnvRedo   = 0U;
@@ -1885,12 +1923,20 @@ static uint8_t Mnv_Rot(float deg)
 #endif
 
         d = Mnv_Wrap(deg - Chassis_GetOdomYaw());
-        if ((d < 0.5f) && (d > -0.5f))
         {
-            mnvOn = 0U;
-            return 1U;                      /* 已经对准 */
+            /* chain=1：差得不多就直接过，不为 1~2° 停一次车（下一段马上接手） */
+            float skip = (chain != 0U) ? MNV_ROT_CHAIN_SKIP_DEG : 0.5f;
+
+            if ((d < skip) && (d > -skip))
+            {
+                mnvOn = 0U;
+                return 1U;                  /* 已经对准 */
+            }
         }
         mnvYawTgtC = mnvYawCont + d;
+
+        /* ★真的要做原地转：平移必然归零（车会滑行到停），下一段从 0 起步 */
+        mnvSpeed = 0.0f;
 
         Chassis_OdomHoldXY(1U);             /* 原地转：冻结 x/y，避免转一次漂一点 */
         Debug_Log("MS", "navvel ROT %d (now h=%d d=%d)",
@@ -1939,6 +1985,26 @@ static uint8_t Mnv_Rot(float deg)
     aerr = (err < 0.0f) ? -err : err;
     ar   = (mnvRate < 0.0f) ? -mnvRate : mnvRate;
 
+    /* ★末端按**里程计残差**混合修正 IMU 目标：IMU 有零漂（实测 ~1.2°/s），
+       "IMU 说转够了"物理上常少 2~3°。原来靠在位后再补转一小段，现场看到的就是
+       "不能一步到位、还要微调一下"。这里在最后 MNV_TURN_NEAR_DEG 内每拍把目标
+       往里程计残差方向挪一点，一次扫到位，落地即为真值。 */
+    if (aerr < MNV_TURN_NEAR_DEG)
+    {
+        float res = Mnv_Wrap(mnvRotDeg - Chassis_GetOdomYaw());
+
+        /* 只有"物理上还差"时才修目标：里程计自己抖 < TOL 就不再动，不会无限爬 */
+        if ((res > MNV_TURN_TOL_DEG) || (res < -MNV_TURN_TOL_DEG))
+        {
+            float corr = Mnv_Wrap(res - err);
+
+            mnvYawTgtC += corr * MNV_ROT_FIX_BLEND;
+            err  = mnvYawTgtC - mnvYawCont;
+            aerr = (err < 0.0f) ? -err : err;
+            mnvOkTick = 0U;                 /* 目标变了 -> 重新计时稳定 */
+        }
+    }
+
     if ((aerr <= MNV_TURN_TOL_DEG) && (ar <= MNV_TURN_ARRIVE_DPS))
     {
         if (mnvOkTick == 0U)
@@ -1947,14 +2013,12 @@ static uint8_t Mnv_Rot(float deg)
         }
         if ((now - mnvOkTick) >= (uint32_t)MNV_TURN_HOLD_MS)
         {
-            /* ★按**里程计朝向**复核一次：IMU 有零漂（实测 ~1.2°/s），
-               赛题页停稳时会测出这个零漂并持续补偿里程计，
-               于是"IMU 转够了"物理上却少了 2~3°（实测转到 -87°）。
-               这里用里程计残差补转一次（最多 2 次，每次参考固定，不会来回摆）。 */
+            /* ★按**里程计朝向**复核一次（兜底）：末端混合修正正常已把它压进 1°，
+               这里只处理"最后一拍仍差一点"的偶发情况，最多补转 1 次。 */
             float res = Mnv_Wrap(mnvRotDeg - Chassis_GetOdomYaw());
 
             if (((res > MNV_ROT_RECHECK_DEG) || (res < -MNV_ROT_RECHECK_DEG)) &&
-                (mnvRedo < 2U))
+                (mnvRedo < 1U))
             {
                 mnvRedo++;
                 mnvYawTgtC = mnvYawCont + res;
@@ -1968,6 +2032,15 @@ static uint8_t Mnv_Rot(float deg)
 
             Chassis_OdomHoldXY(0U);         /* 旋转段结束 -> 解冻，恢复平移坐标累加 */
             Debug_Log("MS", "navvel ROT arrive err=%d", (int)(err * 10.0f));
+
+            if (chain != 0U)
+            {
+                /* ★段间不停顿：不补发 0 速度，下一段段首会立刻接管（车带速切入下一路） */
+                mnvOn = 0U;
+                mnvWz = 0.0f;
+                return 1U;
+            }
+
             Mnv_Stop(now);
             return 0U;
         }
@@ -2092,7 +2165,13 @@ int32_t Mission_VelGetCruise(void)
 
 uint8_t Mission_VelRot(float deg)
 {
-    return Mnv_Rot(deg);
+    return Mnv_Rot(deg, 0U);
+}
+
+/* 带"到位不停车"的旋转：chain=1 时下一段马上接手，段间不留停顿 */
+uint8_t Mission_VelRotEx(float deg, uint8_t chain)
+{
+    return Mnv_Rot(deg, chain);
 }
 
 void Mission_VelStop(void)
