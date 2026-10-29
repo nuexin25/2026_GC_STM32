@@ -68,6 +68,7 @@ typedef enum { AJT_TURN = 0, AJT_LIFT, AJT_CLAW, AJT_GRIP, AJT_CAR } ActJoint_t;
 typedef enum {
     AS_M5 = 0, AS_M6, AS_S1, AS_S2, AS_S3,
     AS_CAR_M5, AS_CAR_M6, AS_CAR_S1,          /* ★车载统一姿态（3 个位置 + 抓放共用） */
+    AS_CAR_PLACE_M6,                          /* ★车载**放料**高度（比抓取高 2000，见头文件） */
     AS_TT_READY_M5, AS_TT_READY_M6, AS_TT_READY_S1,   /* ★观察位（全局，TRAY PICK 用） */
     AS_FIX_S2_OPEN, AS_FIX_S1_RET, AS_FIX_M6_SAFE,
     AS_FIX_SB_SAFE, AS_FIX_S2_CLOSE, AS_FIX_S3_HOME
@@ -171,8 +172,8 @@ static const ActFlowStep_t flowTrayPickPlace[] = {
     { AJT_GRIP, AS_FIX_S2_CLOSE, 0U              },  /* 1 舵机2 夹紧 = 抓 */
     { AJT_LIFT, AS_FIX_M6_SAFE,  ACT_STEP_PAR    },  /* 2 电机6 抬安全高 ‖ */
     { AJT_CLAW, AS_FIX_S1_RET,   ACT_STEP_PAR    },  /* 3 舵机1 缩回 ‖（S1<500 才发转向） */
-    { AJT_TURN, AS_CAR_M5,       ACT_STEP_EARLY  },  /* 4 电机5 转向车载位（±100 提前放行） */
-    { AJT_LIFT, AS_CAR_M6,       0U              },  /* 5 电机6 降到车载高度 */
+    { AJT_TURN, AS_CAR_M5,       ACT_STEP_EARLY | ACT_STEP_S1_GATE },  /* 4 电机5 转向车载位（±100 提前放行，且 S1<500 才发） */
+    { AJT_LIFT, AS_CAR_PLACE_M6, 0U              },  /* 5 ★电机6 降到车载**放料**高度（比抓取高 2000，防撞翻） */
     { AJT_GRIP, AS_FIX_S2_OPEN,  ACT_STEP_SETTLE },  /* 6 舵机2 松手（静置落料后才走） */
     { AJT_LIFT, AS_FIX_M6_SAFE,  0U              },  /* 7 ★抬回安全高（空爪，为下一次转 M5 让路） */
 };
@@ -193,7 +194,7 @@ static const ActFlowStep_t flowTrayPickPlace[] = {
      本动作不再单独走"选号位"这一步。
    ⚠ 本动作**只能在 TTPICK 之后调用**（依赖"M5 已在车载位、S1 已缩回"）。 */
 static const ActFlowStep_t flowCarPlace[] = {
-    { AJT_LIFT, AS_CAR_M6,      0U                    },  /* 1 ★降到车载高度 */
+    { AJT_LIFT, AS_CAR_PLACE_M6, 0U                    },  /* 1 ★降到车载**放料**高度（比抓取高 2000，防撞翻） */
     { AJT_GRIP, AS_FIX_S2_OPEN, ACT_STEP_NOWAIT       },  /* 2 ★松开=放料（命令发出即走，不等回读） */
     { AJT_LIFT, AS_FIX_M6_SAFE, 0U                    },  /* 3 电机6 抬高（空爪） */
 };
@@ -310,7 +311,7 @@ static const ActFlowStep_t flowSbPick[] = {
      （等爪子张开、料落进槽坐稳），再**抬 M6 到安全高**；舵盘回 0（`flowSbNext` 第 2 步）
      自然就排在"抬臂之后"，不会在料还在爪口时就回转刮落。 */
 static const ActFlowStep_t flowSbPlace[] = {
-    { AJT_LIFT, AS_CAR_M6,       0U },                                 /* 1 降到车载高度（接第 5 步的 ±100） */
+    { AJT_LIFT, AS_CAR_PLACE_M6, 0U },                                 /* 1 ★降到车载**放料**高度（比抓取高 2000，防撞翻） */
     { AJT_GRIP, AS_FIX_S2_OPEN,  ACT_STEP_SETTLE },                    /* 2 松手 = 放料（静置落稳后才走） */
     { AJT_LIFT, AS_FIX_M6_SAFE,  0U },                                 /* 3 ★抬到安全高（爪子离料后舵盘才转） */
 };
@@ -541,6 +542,15 @@ static uint32_t actS1GateTick = 0U;
 /* ★【2026-10-28 修"抓空"】夹紧步"抓取闸门"的起始时刻（0 = 没在等）：
    夹紧命令下发前等舵机1（伸缩）后台校验收口，最多 `ACT_GRAB_GATE_MS`。 */
 static uint32_t actGrabGateTick = 0U;
+
+/* ★★【2026-10-29 修"转盘第 2 件转向时 S1 还没缩到位"】舵机1 最近一次**命令下发**时刻
+   （0 = 本次动作还没给 S1 发过命令）。
+   现场现象：转盘区放第 2/3 件时，`flowTtPrep` 先把 S1 伸到 898/924，紧接着
+   `flowTrayPickPlace` 第 3 步命令 S1 -> 0；但**命令下发那一拍**舵机回读缓存还是
+   "伸出之前"的旧值（如 244 < 500），`Act_S1BelowGate()` 误判"已缩到位"，于是
+   电机5 与 S1 同拍下发 -> "电机5 已经转了、S1 还没缩回来"。
+   本时刻专用于闸门：要求**回读必须晚于这条缩回命令**，否则一律按"还没缩到位"处理。 */
+static uint32_t actClawCmdTick = 0U;
 
 /* ★【2026-10-23】"错开启动"的待发步（`ACT_LATE_NONE` = 没有）：
    `ACT_STEP_LATE_START` 标出的那一步先不发，由 `Act_LateStartKick()` 到点发出。 */
@@ -985,18 +995,31 @@ static uint16_t Act_ServoParam(int32_t p)
 }
 
 /**
- * @brief  S1（爪子伸缩）回读是否已经 **小于 `ACT_TURN_S1_GATE`(500)**
+ * @brief  S1（爪子伸缩）回读是否已经 **小于 `ACT_TURN_S1_GATE`(500)** 且**可信**
  * @param  无
- * @retval 1=已小于门限（可以转向）；0=还伸着 **或读不到**
+ * @retval 1=已小于门限（可以转向）；0=还伸着 / 读不到 / **回读是命令之前的老值**
  * @note   ★【2026-10-24 用户要求】"严格要求：**舵机1 未小于 500，电机5 不能转向**"。
  *         读不到时按"还伸着"处理（宁可不转），由 `Act_TurnGateKick` 的兜底超时处理，
  *         避免因为一个回读故障把整段动作永久卡住。
+ *         ★★【2026-10-29 修"转盘第 2 件转向时 S1 还没缩到位"】增加**回读新鲜度**判据：
+ *         本次动作已经给 S1 发过命令（`actClawCmdTick != 0`）时，要求该 ID 的最后一次
+ *         回读**晚于**这条命令。否则读到的是"伸出之前"的老值（< 500），会把
+ *         "还没缩回"误判成"已缩到位"，导致 M5 与 S1 同拍下发。
+ *         · 判"命令之后有没有新回读"必须用 `Servo_GetPosTickById()`（全局时刻会被
+ *           别的舵机刷新成新鲜）。
  */
 static uint8_t Act_S1BelowGate(void)
 {
     uint16_t cur = 0U;
 
     if (Servo_GetPos((uint8_t)SERVO_ID_CLAW, &cur) == 0U) { return 0U; }
+
+    /* 本动作给 S1 发过命令 -> 回读必须晚于那条命令，否则是陈旧值，不能作为放行依据 */
+    if ((actClawCmdTick != 0U) &&
+        ((int32_t)(Servo_GetPosTickById((uint8_t)SERVO_ID_CLAW) - actClawCmdTick) < 0))
+    {
+        return 0U;
+    }
     return (cur < (uint16_t)ACT_TURN_S1_GATE) ? 1U : 0U;
 }
 
@@ -1049,6 +1072,7 @@ static int32_t Act_Resolve(uint8_t src, const ArmCal_t *cal)
         case AS_S3: return cal->s3;      /* ★车载转盘（舵机3） */
         case AS_CAR_M5: return ARM_CAR_M5;   /* ★车载统一姿态（与位置无关） */
         case AS_CAR_M6: return ARM_CAR_M6;
+        case AS_CAR_PLACE_M6: return ARM_CAR_PLACE_M6;   /* ★放料高度（比抓取高 2000） */
         case AS_CAR_S1: return ARM_CAR_S1;
         case AS_TT_READY_M5: return ARM_TT_READY_M5;   /* ★观察位（TRAY PICK 用） */
         case AS_TT_READY_M6: return ARM_TT_READY_M6;
@@ -1176,6 +1200,9 @@ static void Act_SendStep(const ActStep_t *st)
         {
             uint16_t tgt = Act_ServoParam(st->param);
 
+            /* ★【2026-10-29】记录本命令下发时刻：`Act_S1BelowGate()` 用它要求
+               "回读必须晚于这条命令"，避免拿伸出之前的旧回读提前放行转向。 */
+            actClawCmdTick = HAL_GetTick();
             Arm_ServoMove(SERVO_ID_CLAW, tgt);
 #if (ACT_SERVO_OPEN_LOOP != 0U)
             /* ★【2026-10-15】登记"后台舵机校验/补发"：本步放行后由它继续确认到位，
@@ -2391,6 +2418,7 @@ static uint8_t Act_Begin(void)
     actTurnPendIdx = ACT_TURN_PEND_NONE;  /* ★"等 S1 再转向"挂起：不许残留 */
     actLateIdx     = ACT_LATE_NONE;       /* ★"错开启动"挂起：不许残留 */
     actS1GateTick  = 0U;                  /* ★STORE BACK 的"等 S1<500 再转"计时：不许残留 */
+    actClawCmdTick = 0U;                  /* ★"S1 最近一次命令时刻"：新动作重新计（不许残留） */
     actCarS3Resent = 0U;                  /* ★S3 的"已重发"标志：不许残留 */
     {
         uint8_t i;
@@ -3164,6 +3192,7 @@ static void Act_TurnGateKick(void)
 {
     uint8_t  idx = actTurnPendIdx;
     uint16_t curS1 = 0U;
+    uint8_t  posOk = 0U;
     uint8_t  send = 0U;
 
     if (idx == ACT_TURN_PEND_NONE) { return; }
@@ -3173,13 +3202,16 @@ static void Act_TurnGateKick(void)
         return;
     }
 
-    if (Servo_GetPos((uint8_t)SERVO_ID_CLAW, &curS1) != 0U)
+    /* ★【2026-10-29】统一用 `Act_S1BelowGate()`（含"回读必须晚于缩回命令"的新鲜度判据），
+       posOk 只用于选择兜底超时（有回读 2000ms / 读不到 400ms）。 */
+    posOk = Servo_GetPos((uint8_t)SERVO_ID_CLAW, &curS1);
+    if (Act_S1BelowGate() != 0U)
     {
-        if (curS1 < (uint16_t)ACT_TURN_S1_GATE)
-        {
-            send = 1U;
-        }
-        else if ((HAL_GetTick() - actTurnPendTick) >= (uint32_t)ACT_TURN_GATE_MS)
+        send = 1U;
+    }
+    else if (posOk != 0U)
+    {
+        if ((HAL_GetTick() - actTurnPendTick) >= (uint32_t)ACT_TURN_GATE_MS)
         {
             /* 回读可用但 S1 一直降不下来（真的顶住了）：2000ms 上限，宁可慢也不无限等 */
             send = 1U;
@@ -3291,8 +3323,9 @@ void ArmAct_Update(void)
         {
             uint16_t curS1 = 0U;
             uint8_t  posOk = Servo_GetPos((uint8_t)SERVO_ID_CLAW, &curS1);
-            uint8_t  ready = ((posOk != 0U) &&
-                              (curS1 < (uint16_t)ACT_TURN_S1_GATE)) ? 1U : 0U;
+            /* ★【2026-10-29】统一用 `Act_S1BelowGate()`：它额外要求"回读必须晚于本次
+               动作给 S1 下发的缩回命令"，否则拿伸出之前的旧值（<500）提前放行转向。 */
+            uint8_t  ready = Act_S1BelowGate();
 
             if (ready == 0U)
             {
@@ -4131,6 +4164,35 @@ uint8_t ArmAct_IsAborted(void)
 uint8_t ArmAct_GripFailed(void)
 {
     return actGripFail;
+}
+
+/* ★★【2026-10-29 用户要求】"抓最后一个物料时，一定要保证**物料已经抓在爪子上**。
+   用途：任务点想"提前跑路段"（底盘先动、手臂并行）时，光看 S1 回 0 不够 ——
+   S1 的回读可能是**上一件留下的 0**（缓存有效期 1000ms），那时爪子还没夹紧。
+   判据 = ①本段没被判夹爪失败；②舵机2 回读有效且 ≤ `ACT_GRIP_GRAB_MAX`(700)
+          （夹到料一定会被顶在这个位置以内；空爪全闭是 520，也算"闭合"，
+            所以必须配合 `ArmAct_GripFailed()` 一起看，失败时本函数返回 0）。
+   注意：回读不可用 -> 0（**不放行**），宁可退回"等整段跑完"也不带着没夹住的料动车。 */
+uint8_t ArmAct_GripHeld(void)
+{
+    uint16_t p = 0U;
+
+    if (actGripFail != 0U)
+    {
+        return 0U;
+    }
+    if (Servo_GetPos((uint8_t)SERVO_ID_GRIP, &p) == 0U)
+    {
+        return 0U;
+    }
+    return (p <= (uint16_t)ACT_GRIP_GRAB_MAX) ? 1U : 0U;
+}
+
+/* ★★【2026-10-29 用户要求】"抓最后一个物料时，一定要保证**手臂抬高了**"。
+   直接转调内部的 `Act_LiftAboveSafe()`（M6 ≥ `ACT_PAIR_MIN_M6`，值越大越高）。 */
+uint8_t ArmAct_LiftAboveSafe(void)
+{
+    return Act_LiftAboveSafe();
 }
 
 uint8_t ArmAct_HasUnreached(void)

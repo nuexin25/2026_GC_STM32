@@ -11,13 +11,14 @@
  *           -> TT_RCP_SHIFT ★一直没数据（视觉没看到转盘）就向车身右侧平移
  *              TRAY_RCP_SHIFT_MM，然后重发 `$RCP` 重新识别（最多 TRAY_RCP_SHIFT_MAX 次）
  *           -> TT_ALIGN 车身对位（Align_Start，数据源 `$RCP`）
- *           -> TT_RZ_BASE ★【2026-10-24 新抓取逻辑】周期发 `$RZ`，先锁一份**基准映射**
- *              （位号↔颜色），要求连续两帧完全一致才认，避免把"正在转"的混合帧当基准
- *           -> TT_RZ_EDGE ★继续发 `$RZ`，一旦映射相对基准发生**完美循环移位**且连续两帧
- *              一致，就认定"转盘转过了一步"，把这次变化**首次出现的时刻记为 t0**，
- *              并立即去 t0 那帧里第 1 件目标色所在的位号抓（不推算）
- *           -> TT_PREP 手臂去本件目标位号：第 1 件 = t0 那帧的位号；第 2/3 件 =
- *              基准位号 + 由 (t0 -> 现在) 时间推算的步数
+ *              ★★【2026-10-29 用户要求】"颜色顺序记忆 + 定时"在**对位阶段就开始**：
+ *              TT_WAIT_RCP / TT_ALIGN 期间并行周期发 `$RZ`（`Tt_RzTrack`）：
+ *                ① 同一份"位号↔颜色"映射连续两帧一致 -> 锁 `ttMapBase`（= 记住颜色顺序）；
+ *                ② 再等到"完美循环移位"且连续两帧一致 -> 认 t0 并分配 3 件位号（= 开始计时）。
+ *              对位成功时若 t0 已就绪 -> **直接进 TT_PREP 抓第 1 件**，不再等帧。
+ *           -> TT_RZ_BASE 对位期间没锁成基准时，仍在此锁一份**基准映射**
+ *           -> TT_RZ_EDGE 对位期间只锁到基准、没认到 t0 时，仍在此等换位边沿定 t0
+ *           -> TT_PREP 手臂去本件目标位号：位号 = 基准位号 + 由 (t0 -> 现在) 时间推算的步数
  *              （★每个周期**前 TRAY_ROT_LEAD_MS（默认 2s）** 就地抓算出来的位号；
  *                之后提前去"算出来的下一个位号"并**停在那里等料转到位**再抓）。
  *              ★第 2/3 件**不再回观察位、不再对位**，S3 在本状态内预转。
@@ -82,8 +83,6 @@ static uint32_t   ttRzTick    = 0U;              /* $RZ 上次发送时刻（单
 static uint8_t    ttRzSent    = 0U;              /* $RZ 已发送次数 */
 static uint8_t    ttAlignOn   = 0U;              /* 1=本次对位已启动（避免重复 Align_Start） */
 static uint8_t    ttArmOn     = 0U;              /* 1=机械臂本段已启动（避免重复下发） */
-static uint32_t   ttPlaceIdleTick = 0U;          /* ★放料动作跑完的时刻（0=还没跑完），
-                                                    用于"抬完臂再延时转舵盘" */
 static uint8_t    ttTailOnly  = 0U;              /* ★1=最后一件已到手且 S1 已回 0，
                                                     只剩"放回车载"这类多余动作 -> 可让底盘先动 */
 static uint8_t    ttTailCand  = 0U;              /* ★1=最后一件已到手（"只剩收尾"候选），
@@ -109,6 +108,15 @@ static uint8_t    ttCcgArmed  = 0U;                  /* ★【2026-10-26】1=已
                                                         （0=手臂还在行程中，不许发 `$CCG`/不许抓） */
 static uint32_t   ttArmIdleTick = 0U;                /* ★【2026-10-26】手臂首次"空闲"的时刻（0=还在动），
                                                         静置 TT_PREP_ARRIVE_MS 后认定"到达等待位" */
+/* ★【2026-10-29 用户要求】"颜色顺序记忆 + 定时"在**对位阶段**就开始做：
+   对位期间并行跑 `$RZ` 跟踪，进度记在 ttRzPhase 里。 */
+#define TT_RZ_WAIT   0U     /* 还没锁到"连续两帧一致"的基准映射 */
+#define TT_RZ_BASED  1U     /* 基准映射已锁，继续等"完美循环移位" */
+#define TT_RZ_T0     2U     /* 已认出换位边沿、t0 已定：对位一结束就能直接抓 */
+
+static uint8_t    ttRzPhase     = TT_RZ_WAIT;        /* ★对位阶段 $RZ 跟踪进度 */
+static uint8_t    ttRzOddCnt    = 0U;                /* ★TT_RZ_EDGE 里"连续既非基准、
+                                                        也非循环移位"的帧数（判基准是否失效） */
 
 /* ===================== 内部函数 ===================== */
 
@@ -286,6 +294,101 @@ static uint8_t Tt_IsRotChanged(const uint8_t *base, const uint8_t *cur)
     return 0U;
 }
 
+/* 前置声明：`Tt_RzTrack` 内部要用（定义在它之后） */
+static uint8_t Tt_AssignRef(const uint8_t *map);
+
+/**
+ * @brief  ★【2026-10-29 用户要求】对位阶段就"记住颜色顺序 + 开始计时"
+ * @param  无
+ * @retval 当前跟踪进度（TT_RZ_WAIT / TT_RZ_BASED / TT_RZ_T0）
+ * @note   周期发 `$RZ`（单帧快照必须重发），分两步：
+ *         ① 等**同一份"位号->颜色"映射连续两帧一致** -> 锁 `ttMapBase`（= 记住颜色顺序）；
+ *         ② 继续等**完美循环移位**且连续两帧一致 -> 把这次变化**首次出现**的时刻记为
+ *            `ttT0`、把 t0 那帧存进 `ttMapRef` 并分配好 3 件位号（= 开始计时）。
+ *         对位一结束（`TT_ALIGN` done）若已到 TT_RZ_T0，就**直接进 TT_PREP 抓第 1 件**，
+ *         不再走 TT_RZ_BASE / TT_RZ_EDGE 的等帧。第 2/3 件仍按 `Tt_PredictPos` 推算。
+ */
+static uint8_t Tt_RzTrack(void)
+{
+    const RPi_Rz_t *rz;
+
+    Tt_RzPoll();
+
+    rz = RPi_GetRz();
+    if ((rz->valid == 0U) || (rz->lastRxTick == ttRzRxTick))
+    {
+        return ttRzPhase;                   /* 没新帧：等下一拍 */
+    }
+    ttRzRxTick = rz->lastRxTick;
+
+    if (Tt_MapReady(rz->byPos) == 0U)
+    {
+        return ttRzPhase;                   /* 有漏识别：不参与比较 */
+    }
+
+    /* ---- ① 锁基准映射（"连续两帧一致"才认，排除正在转的混合帧）---- */
+    if (ttRzPhase == TT_RZ_WAIT)
+    {
+        if (Tt_MapEqual(ttMapCand, rz->byPos) != 0U)
+        {
+            ttMapBase[1] = rz->byPos[1];
+            ttMapBase[2] = rz->byPos[2];
+            ttMapBase[3] = rz->byPos[3];
+            ttRzPhase    = TT_RZ_BASED;
+            ttRzOddCnt   = 0U;
+            Debug_Log("TT", "base map locked (align): P1=C%u P2=C%u P3=C%u",
+                      (unsigned int)ttMapBase[1], (unsigned int)ttMapBase[2],
+                      (unsigned int)ttMapBase[3]);
+        }
+        else
+        {
+            ttMapCand[1] = rz->byPos[1];
+            ttMapCand[2] = rz->byPos[2];
+            ttMapCand[3] = rz->byPos[3];
+        }
+        return ttRzPhase;
+    }
+
+    /* ---- ② 等"完美循环移位" -> 记 t0（同样要连续两帧一致）---- */
+    if (Tt_MapEqual(ttMapCand, rz->byPos) != 0U)
+    {
+        if (Tt_IsRotChanged(ttMapBase, rz->byPos) == 0U)
+        {
+            return ttRzPhase;               /* 和候选一致、但相对基准没转：继续等 */
+        }
+
+        ttMapRef[1] = rz->byPos[1];
+        ttMapRef[2] = rz->byPos[2];
+        ttMapRef[3] = rz->byPos[3];
+        ttT0        = ttCandTick;
+
+        if (Tt_AssignRef(ttMapRef) == 0U)
+        {
+            Debug_Log("TT", "WARN align-phase assign ref failed (colors %u,%u,%u map %u,%u,%u)",
+                      (unsigned int)ttColors[0], (unsigned int)ttColors[1],
+                      (unsigned int)ttColors[2], (unsigned int)ttMapRef[1],
+                      (unsigned int)ttMapRef[2], (unsigned int)ttMapRef[3]);
+            return ttRzPhase;
+        }
+
+        ttRzPhase = TT_RZ_T0;
+        Debug_Log("TT", "align-phase t0: ref P%u/P%u/%u (colors %u,%u,%u)",
+                  (unsigned int)ttRefPos[0], (unsigned int)ttRefPos[1],
+                  (unsigned int)ttRefPos[2], (unsigned int)ttColors[0],
+                  (unsigned int)ttColors[1], (unsigned int)ttColors[2]);
+        return ttRzPhase;
+    }
+
+    if (Tt_IsRotChanged(ttMapBase, rz->byPos) != 0U)
+    {
+        ttMapCand[1] = rz->byPos[1];
+        ttMapCand[2] = rz->byPos[2];
+        ttMapCand[3] = rz->byPos[3];
+        ttCandTick   = HAL_GetTick();       /* t0 取"这份映射首次出现"的时刻 */
+    }
+    return ttRzPhase;
+}
+
 /**
  * @brief  按本轮目标色顺序，给 3 件分配"基准位号"（写 ttRefPos[]）
  * @param  map: 映射（位号->颜色），通常是 t0 时刻的 ttMapRef
@@ -424,7 +527,6 @@ void TT_Init(void)
     ttRzTick    = 0U;
     ttAlignOn   = 0U;
     ttArmOn     = 0U;
-    ttPlaceIdleTick = 0U;
     ttTailOnly  = 0U;
     ttTailCand  = 0U;
     ttShiftCnt  = 0U;
@@ -454,6 +556,8 @@ void TT_Init(void)
     ttCcgRxTick  = 0U;
     ttCcgArmed   = 0U;
     ttArmIdleTick = 0U;
+    ttRzPhase     = TT_RZ_WAIT;
+    ttRzOddCnt    = 0U;
 
     Debug_Log("TT", "init (items=%u, slot order %u->%u)",
               (unsigned int)TT_ITEM_COUNT,
@@ -514,7 +618,6 @@ uint8_t TT_StartWithColors(const uint8_t *colors3)
     ttRzTick    = 0U;
     ttAlignOn   = 0U;
     ttArmOn     = 0U;
-    ttPlaceIdleTick = 0U;
     ttTailOnly  = 0U;
     ttTailCand  = 0U;
     ttShiftCnt  = 0U;
@@ -540,6 +643,8 @@ uint8_t TT_StartWithColors(const uint8_t *colors3)
     ttCcgRxTick  = 0U;
     ttCcgArmed   = 0U;
     ttArmIdleTick = 0U;
+    ttRzPhase     = TT_RZ_WAIT;
+    ttRzOddCnt    = 0U;
 
     /* 本轮取料重新记账：车载位↔颜色表清零 */
     Task_SetCarSlotColor(1U, 0U);
@@ -598,6 +703,21 @@ void TT_Update(void)
 
             if (ttArmOn == 0U)
             {
+                /* ★【2026-10-29 用户要求】"每个任务点快到达的时候，就提前将手臂转到
+                   观察位，并且任务点**不重复**操作此动作"：路上 `Tsk_ArmPreTry()` 已经
+                   调过 `ArmAct_GotoTtReady()`，到点时若已在观察位就**整段跳过**
+                   `ArmAct_TrayReady()`（只补一次舵盘预选），省掉重复摆臂的时间。
+                   与 `SP_OBSERVE` / `STACK_STORE` 的写法一致。 */
+                if (ArmAct_IsAtTtReady() != 0U)
+                {
+                    (void)ArmAct_PreSelectSlot(slot);
+                    Debug_Log("TT", "already at observe -> skip tray ready (slot%u)",
+                              (unsigned int)slot);
+                    ttShiftCnt = 0U;
+                    ttShiftOn  = 0U;
+                    Tt_GoTo(TT_REQ_RCP, (uint32_t)TRAY_RCP_TIMEOUT_MS);
+                    break;
+                }
                 if (ArmAct_TrayReady(slot) != 0U)
                 {
                     ttArmOn = 1U;
@@ -634,6 +754,9 @@ void TT_Update(void)
              原地死等只会超时 FAIL，改为"向右挪一小段换视角 -> 重发 $RCP 重新识别"，
              最多挪 TRAY_RCP_SHIFT_MAX 次；用完还看不到才判失败。 */
         case TT_WAIT_RCP:
+            /* ★【2026-10-29】等 $RCP 的这段时间手臂已在观察位、相机看得到转盘：
+               并行开始"颜色顺序记忆 + 计时"（锁基准映射 + 认 t0），对位结束就不用再等帧。 */
+            Tt_RzTrack();
             if (RPi_GetRcp()->valid != 0U)
             {
                 Debug_Log("TT", "RCP ok dx=%d dy=%d -> align",
@@ -671,6 +794,9 @@ void TT_Update(void)
 
         /* ---- ④ 对位（数据源 $RCP；本次只做一次）---- */
         case TT_ALIGN:
+            /* ★【2026-10-29】对位期间继续盯着 `$RZ`：颜色顺序（基准映射）和 t0（计时起点）
+               都在这里定好，对位成功就能直接按"4s 转 / 2s 停"的窗口去抓目标色。 */
+            Tt_RzTrack();
             if (ttAlignOn == 0U)
             {
                 if (Align_Start() != 0U)
@@ -691,11 +817,37 @@ void TT_Update(void)
                    （"回到观察区的同时转到该车载号位"），这里**不再重复下发**，
                    保证舵盘每个物料只执行一次换位命令。 */
                 ttRzSent     = 0U;
-                ttRzRxTick   = 0U;
-                ttMapCand[1] = 0U;
-                ttMapCand[2] = 0U;
-                ttMapCand[3] = 0U;
-                Tt_GoTo(TT_RZ_BASE, (uint32_t)TRAY_RZ_BASE_TIMEOUT_MS);
+                ttRzOddCnt   = 0U;
+                if (ttRzPhase == TT_RZ_T0)
+                {
+                    /* ★★【2026-10-29 用户要求】"颜色顺序和定时在对位阶段就记忆，对位成功
+                       后直接抓取"：t0 已在对位期间定好、3 件位号也已分配好 —— 这里
+                       直接进 TT_PREP 抓第 1 件（位号在 TT_PREP 里按 t0 推算），
+                       不再走 TT_RZ_BASE / TT_RZ_EDGE 的等帧。 */
+                    ttItem      = 0U;
+                    ttTargetPos = 0U;
+                    ttArmOn     = 0U;
+                    ttWaitTick  = 0U;
+                    ttCcgSent   = 0U;
+                    ttCcgTick   = 0U;
+                    Debug_Log("TT", "align done -> t0 ready, grab item1 (ref P%u)",
+                              (unsigned int)ttRefPos[0]);
+                    Tt_GoTo(TT_PREP, (uint32_t)TT_ARM_TIMEOUT_MS);
+                }
+                else if (ttRzPhase == TT_RZ_BASED)
+                {
+                    /* 颜色顺序已记住、还差一个换位边沿：只剩等边沿 */
+                    Debug_Log("TT", "align done -> base ready, wait edge only");
+                    Tt_GoTo(TT_RZ_EDGE, (uint32_t)TRAY_RZ_EDGE_TIMEOUT_MS);
+                }
+                else
+                {
+                    ttRzRxTick   = 0U;
+                    ttMapCand[1] = 0U;
+                    ttMapCand[2] = 0U;
+                    ttMapCand[3] = 0U;
+                    Tt_GoTo(TT_RZ_BASE, (uint32_t)TRAY_RZ_BASE_TIMEOUT_MS);
+                }
             }
             else
             {
@@ -773,6 +925,7 @@ void TT_Update(void)
             {
                 if (Tt_IsRotChanged(ttMapBase, rz->byPos) == 0U)
                 {
+                    ttRzOddCnt = 0U;
                     break;                  /* 只是和候选一致、相对基准并没转：继续等 */
                 }
 
@@ -812,6 +965,36 @@ void TT_Update(void)
                 ttMapCand[2] = rz->byPos[2];
                 ttMapCand[3] = rz->byPos[3];
                 ttCandTick   = HAL_GetTick();
+                ttRzOddCnt   = 0U;
+                break;
+            }
+
+            if (Tt_MapEqual(ttMapBase, rz->byPos) != 0U)
+            {
+                ttRzOddCnt = 0U;            /* 和基准一致（还没转）：继续等 */
+                break;
+            }
+
+            /* ★【2026-10-29】这一帧**既不是基准、也不是完美循环移位**：如果用对位阶段
+               提前锁的基准，可能是车身对位过程改变了视角（位号映射整体变了），此时
+               永远等不到"完美循环移位" -> 只能 20s 超时 FAIL。连续 3 帧都这样才认定
+               基准失效，退回 TT_RZ_BASE 重新锁一份再继续等。 */
+            if ((ttRzPhase != TT_RZ_T0) && (ttRzPhase != TT_RZ_BASED))
+            {
+                break;                      /* 基准是原地锁的：按原逻辑继续等 */
+            }
+            ttRzOddCnt++;
+            if (ttRzOddCnt >= 3U)
+            {
+                Debug_Log("TT", "WARN early base stale (%u,%u,%u) -> relock base",
+                          (unsigned int)rz->byPos[1], (unsigned int)rz->byPos[2],
+                          (unsigned int)rz->byPos[3]);
+                ttRzPhase     = TT_RZ_WAIT;
+                ttRzOddCnt    = 0U;
+                ttMapCand[1]  = 0U;
+                ttMapCand[2]  = 0U;
+                ttMapCand[3]  = 0U;
+                Tt_GoTo(TT_RZ_BASE, (uint32_t)TRAY_RZ_BASE_TIMEOUT_MS);
             }
             break;
         }
@@ -920,7 +1103,6 @@ void TT_Update(void)
             if (ArmAct_TrayPickPlace(slot) != 0U)
             {
                 ttArmOn         = 1U;
-                ttPlaceIdleTick = 0U;   /* ★新的一段动作：放料跑完时刻重新计 */
                 Debug_Log("TT", "grab+place slot%u (TRAYPICK)", (unsigned int)slot);
 
                 /* 最后一件已到手：只记"候选"，真正的放行判据（S1 已回 0）在 TT_PLACE 每拍复核 */
@@ -941,12 +1123,19 @@ void TT_Update(void)
 
             /* ★【2026-10-15 用户要求】**每拍复核**"只剩收尾 + S1 已回 0"（**严格档**：
                回读不可用不放行）。通过了才置 `ttTailOnly` -> 任务点可让底盘先动、手臂并行。
-               ★【2026-10-21 规则3】放行判据 = **S1 已回 0** 或 **手臂已进入电机5 转向那一步**。 */
+               ★【2026-10-21 规则3】放行判据 = **S1 已回 0** 或 **手臂已进入电机5 转向那一步**。
+               ★★【2026-10-29 用户要求】"抓最后一个物料时，一定要保证**物料已经抓在爪子上**，
+               并且**手臂抬高了**，再进行提前跑路段操作"：上面两条**只看 S1 回读**，
+               而 S1 的回读可能是**上一件留下的 0**（缓存有效期 1000ms），进 TT_PLACE 的
+               第一拍就能命中 -> 车立刻开跑，此时爪子还没夹紧、手臂还低在转盘里
+               （现场现象："最后一个还没抓到车就跑了"）。所以必须再加：
+               `ArmAct_GripHeld()`（料确实夹住） + `ArmAct_LiftAboveSafe()`（M6 已抬高）。 */
             if ((ttTailCand != 0U) && (ttTailOnly == 0U) &&
+                (ArmAct_GripHeld() != 0U) && (ArmAct_LiftAboveSafe() != 0U) &&
                 ((ArmAct_S1Retracted() != 0U) || (ArmAct_IsTurning() != 0U)))
             {
                 ttTailOnly = 1U;
-                Debug_Log("TT", "tail only: %s -> chassis may start",
+                Debug_Log("TT", "tail only: grip held + lifted + %s -> chassis may start",
                           (ArmAct_IsTurning() != 0U) ? "M5 turning" : "S1=0");
             }
 
@@ -956,19 +1145,14 @@ void TT_Update(void)
             }
 
             /* ★【2026-10-24 用户要求】"舵盘(舵机3)转向还是太快 —— 等手臂把物料松开、
-               抬起来了再转舵盘，不要同时"：本段动作（含末步"电机6 抬回安全高"）已经
-               跑完，再**静置 `TT_PLACE_S3_DELAY_MS`** 才记账并预转 S3，
-               保证"抬臂"和"转舵盘"彻底分开。 */
-            if (ttPlaceIdleTick == 0U)
-            {
-                ttPlaceIdleTick = HAL_GetTick();
-                break;
-            }
-            if ((uint32_t)(HAL_GetTick() - ttPlaceIdleTick) < (uint32_t)TT_PLACE_S3_DELAY_MS)
-            {
-                break;
-            }
-            ttPlaceIdleTick = 0U;
+               抬起来了再转舵盘，不要同时"。原实现是"放料动作跑完后再静置
+               `TT_PLACE_S3_DELAY_MS`(100ms)"；★★【2026-10-29 用户要求】"手臂运行过程中
+               有很多不必要的等待，能优化的都优化掉"：`flowTrayPickPlace` 的末步就是
+               "电机6 抬回安全高"，松爪步还自带 `ACT_PLACE_SETTLE_MS` 静置 —— 等它
+               `ArmAct_IsBusy()==0` 时"抬臂"早已完成，这 100ms 纯属重复，**整段删除**
+               （`ttPlaceIdleTick` 变量与 `TT_PLACE_S3_DELAY_MS` 宏一并去掉）。
+               现场若再觉得"抬臂和转舵盘挨太近"，请在 `flowTrayPickPlace` 末步加
+               `ACT_STEP_SETTLE`，而不是恢复这里的空等。 */
             ttArmOn = 0U;
             /* ★★【2026-10-24 用户要求】"没抓住物料就停下报 FAIL，绝不动别的关节"：
                夹紧判据已重做（见 `Act_ServoDoneGrip`），只有"确实夹到"才放行；
@@ -1870,10 +2054,12 @@ void SB_Update(void)
                （`T_B1_STO_GO`），手臂并行去"放回车载号位"。
                复核窗口 = 本状态全程：`flowSbPlace` 开头有 rule3 自动插的"收爪"步，
                S1 会在 0 停留到"伸爪"那一步，足够复核上（周期 100ms）。 */
-            if ((sbTailCand != 0U) && (sbTailOnly == 0U) && (ArmAct_S1Retracted() != 0U))
+            if ((sbTailCand != 0U) && (sbTailOnly == 0U) &&
+                (ArmAct_GripHeld() != 0U) && (ArmAct_LiftAboveSafe() != 0U) &&
+                (ArmAct_S1Retracted() != 0U))
             {
                 sbTailOnly = 1U;
-                Debug_Log("SB", "tail only: S1=0 confirmed -> chassis may start");
+                Debug_Log("SB", "tail only: grip held + lifted + S1=0 -> chassis may start");
             }
 
             if (sbArmOn == 0U)
