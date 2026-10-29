@@ -146,7 +146,12 @@ extern "C" {
 #define ALIGN_PID_XY_SIMUL      1U      /* 1=X/Y **同时**闭环（快）；0=先 X 后 Y（旧口径） */
 
 /* ---- 三个数据源**共用**的量（一般不用动） ---- */
-#define ALIGN_PID_I_MAX         4.0f    /* 平移积分项**输出**限幅（RPM），防积饱和 */
+#define ALIGN_PID_I_MAX         1.0f    /* 平移积分项**输出**限幅（RPM），防积饱和
+                                            ★【2026-10-29 调参】4.0 -> 1.0：
+                                           原 4.0RPM 的积分在 |误差|>I_SEP(10mm) 时**冻结在饱和值**，
+                                           离开 10mm 带后 P 项（20mm/3.6RPM）会被这 4RPM 完全抵消 ->
+                                           日志实测 STACK 位 py 卡在 30~35px、`u=0,0,0` 死等几十秒。
+                                           压到 1.0RPM 后积分永远吃不掉 P 项，末端能自己走出来。 */
 #define ALIGN_PID_I_SEP_MM      10.0f   /* 平移积分分离：|误差| ≤ 本值才积分（mm）
                                            【2026-10-15 由 60 改 10】60mm 时积分在整段接近里
                                            一直累积 -> 到点已经积到 4RPM，末端必冲过头；
@@ -365,7 +370,7 @@ extern "C" {
  * 只在对位**成功**时响；失败/中止不响。
  *   TIMES = 0 关闭；ON_MS 每声时长；OFF_MS 两声之间的间隔。
  * 注意：BSP_Beep 是非阻塞"登记"，不会拖慢对位收尾。 */
-#define ALIGN_DONE_BEEP_TIMES   2U
+#define ALIGN_DONE_BEEP_TIMES   1U      /* ★【2026-10-29 调参】2 -> 1：每次对位省 ~160ms（全程 6~7 次） */
 #define ALIGN_DONE_BEEP_ON_MS   80U
 #define ALIGN_DONE_BEEP_OFF_MS  80U
 

@@ -98,6 +98,12 @@ typedef enum {
    舵机步命令发出后**强制静置 `ACT_PLACE_SETTLE_MS`** 才放行下一步
    （用于放料松爪步）。与 `ACT_STEP_NOWAIT` 互斥——本标志优先。 */
 #define ACT_STEP_SETTLE         0x20U
+/* ★★【2026-10-29 用户要求】"抓取/放置车载时爪子要真的伸出去"：
+   车载伸缩位 `ARM_CAR_S1`(66) 与缩回位 0 只差 66，落在 `ACT_SERVO_LOOSE_TOL`(80) 里，
+   于是每个 `CLAW -> 66` 的步都被 `Act_StepAlreadyThere()` 判成"已到位"**直接跳过**
+   （日志实证：`step2/13 CLAW already at 66 -> next` ×4），命令一帧都没发 -> 现场"手不伸"。
+   本标志 = **该步必须真正下发**，不参与"已经在那儿"的跳过。 */
+#define ACT_STEP_FORCE          0x40U
 
 /* ★【2026-10-24 用户要求】"电机5 转向到达目标参数 **±100** 范围内，电机6 下降" */
 #define ACT_TURN_EARLY_REL      100
@@ -173,9 +179,10 @@ static const ActFlowStep_t flowTrayPickPlace[] = {
     { AJT_LIFT, AS_FIX_M6_SAFE,  ACT_STEP_PAR    },  /* 2 电机6 抬安全高 ‖ */
     { AJT_CLAW, AS_FIX_S1_RET,   ACT_STEP_PAR    },  /* 3 舵机1 缩回 ‖（S1<500 才发转向） */
     { AJT_TURN, AS_CAR_M5,       ACT_STEP_EARLY | ACT_STEP_S1_GATE },  /* 4 电机5 转向车载位（±100 提前放行，且 S1<500 才发） */
-    { AJT_LIFT, AS_CAR_PLACE_M6, 0U              },  /* 5 ★电机6 降到车载**放料**高度（比抓取高 2000，防撞翻） */
-    { AJT_GRIP, AS_FIX_S2_OPEN,  ACT_STEP_SETTLE },  /* 6 舵机2 松手（静置落料后才走） */
-    { AJT_LIFT, AS_FIX_M6_SAFE,  0U              },  /* 7 ★抬回安全高（空爪，为下一次转 M5 让路） */
+    { AJT_CLAW, AS_CAR_S1,       ACT_STEP_FORCE  },  /* 5 ★伸爪到车载位（★2026-10-29：先伸爪再下降；强制下发，否则被"已到位"跳过） */
+    { AJT_LIFT, AS_CAR_PLACE_M6, 0U              },  /* 6 ★电机6 降到车载**放料**高度（比抓取高 2000，防撞翻） */
+    { AJT_GRIP, AS_FIX_S2_OPEN,  ACT_STEP_SETTLE },  /* 7 舵机2 松手（静置落料后才走） */
+    { AJT_LIFT, AS_FIX_M6_SAFE,  0U              },  /* 8 ★抬回安全高（空爪，为下一次转 M5 让路） */
 };
 
 /* ---- B. 放置车载 1~3 号盘 ----
@@ -192,11 +199,16 @@ static const ActFlowStep_t flowTrayPickPlace[] = {
    · 第 2 步带 `ACT_STEP_NOWAIT`：用户明确"松抓指令下发就行"，不等回读确认。
    ★【2026-10-24 用户要求】舵盘（S3）由**对位成功那拍预转**（`ArmAct_PreSelectSlot`），
      本动作不再单独走"选号位"这一步。
-   ⚠ 本动作**只能在 TTPICK 之后调用**（依赖"M5 已在车载位、S1 已缩回"）。 */
+   ⚠ 本动作**只能在 TTPICK 之后调用**（依赖"M5 已在车载位"）。
+   ★★【2026-10-29 用户要求】"放置车载时手也要伸出去"：开头补一步 `S1 -> ARM_CAR_S1`(66)，
+     且带 `ACT_STEP_FORCE`（66 与缩回位 0 只差 66 < 容差 80，不带本标志会被判"已到位"跳过）。 */
+
+   /* 动序：伸爪 -> 降 M6 -> 松抓(不等待) -> 抬高 */
 static const ActFlowStep_t flowCarPlace[] = {
-    { AJT_LIFT, AS_CAR_PLACE_M6, 0U                    },  /* 1 ★降到车载**放料**高度（比抓取高 2000，防撞翻） */
-    { AJT_GRIP, AS_FIX_S2_OPEN, ACT_STEP_NOWAIT       },  /* 2 ★松开=放料（命令发出即走，不等回读） */
-    { AJT_LIFT, AS_FIX_M6_SAFE, 0U                    },  /* 3 电机6 抬高（空爪） */
+    { AJT_CLAW, AS_CAR_S1,       ACT_STEP_FORCE },  /* 1 ★伸爪到车载位（★2026-10-29 用户要求：放料也要伸出去；强制下发） */
+    { AJT_LIFT, AS_CAR_PLACE_M6, 0U                    },  /* 2 ★降到车载**放料**高度（比抓取高 2000，防撞翻） */
+    { AJT_GRIP, AS_FIX_S2_OPEN, ACT_STEP_NOWAIT       },  /* 3 ★松开=放料（命令发出即走，不等回读） */
+    { AJT_LIFT, AS_FIX_M6_SAFE, 0U                    },  /* 4 电机6 抬高（空爪） */
 };
 /* 【2026-10-24 已清掉旧的三位置数据】原来这里记着 1/2/3 号盘各自的
    M5=642/347/49、S1=235/82/233、M6=-15415 —— 那套随"车载改用舵机3 选位 +
@@ -216,7 +228,7 @@ static const ActFlowStep_t flowCarPick[] = {
     { AJT_LIFT, AS_FIX_M6_SAFE },                   /* 1 电机6 抬到安全高（先把爪子抬离转盘） */
     { AJT_CAR,  AS_S3          },                   /* 2 ★车载转盘（舵机3）转到该号位 */
     { AJT_TURN, AS_CAR_M5      },                   /* 3 统一转向角（ARM_CAR_M5） */
-    { AJT_CLAW, AS_CAR_S1      },                   /* 4 统一伸爪位置（ARM_CAR_S1） */
+    { AJT_CLAW, AS_CAR_S1, ACT_STEP_FORCE },        /* 4 统一伸爪位置（ARM_CAR_S1；★2026-10-29 强制下发，真伸出去） */
     { AJT_LIFT, AS_CAR_M6      },                   /* 5 统一高度（ARM_CAR_M6） */
     { AJT_GRIP, AS_FIX_S2_CLOSE},                   /* 6 舵机2 夹紧（固定"夹紧"） */
     { AJT_LIFT, AS_FIX_M6_SAFE },                   /* 7 电机6 抬高（带料） */
@@ -311,9 +323,10 @@ static const ActFlowStep_t flowSbPick[] = {
      （等爪子张开、料落进槽坐稳），再**抬 M6 到安全高**；舵盘回 0（`flowSbNext` 第 2 步）
      自然就排在"抬臂之后"，不会在料还在爪口时就回转刮落。 */
 static const ActFlowStep_t flowSbPlace[] = {
-    { AJT_LIFT, AS_CAR_PLACE_M6, 0U },                                 /* 1 ★降到车载**放料**高度（比抓取高 2000，防撞翻） */
-    { AJT_GRIP, AS_FIX_S2_OPEN,  ACT_STEP_SETTLE },                    /* 2 松手 = 放料（静置落稳后才走） */
-    { AJT_LIFT, AS_FIX_M6_SAFE,  0U },                                 /* 3 ★抬到安全高（爪子离料后舵盘才转） */
+    { AJT_CLAW, AS_CAR_S1,       ACT_STEP_FORCE },                     /* 1 ★伸爪到车载位（★2026-10-29；强制下发，否则被"已到位"跳过） */
+    { AJT_LIFT, AS_CAR_PLACE_M6, 0U },                                 /* 2 ★降到车载**放料**高度（比抓取高 2000，防撞翻） */
+    { AJT_GRIP, AS_FIX_S2_OPEN,  ACT_STEP_SETTLE },                    /* 3 松手 = 放料（静置落稳后才走） */
+    { AJT_LIFT, AS_FIX_M6_SAFE,  0U },                                 /* 4 ★抬到安全高（爪子离料后舵盘才转） */
 };
 
 /* ⑥：转向下一件 + 舵盘回 0（同拍）-> 伸出 + 下降（同拍） */
@@ -1812,6 +1825,13 @@ static uint8_t Act_StepAlreadyThere(const ActStep_t *st)
 {
     int32_t d;
 
+    /* ★【2026-10-29】带 `ACT_STEP_FORCE` 的步**必须真正下发**，不做"已经在那儿"的跳过
+       （车载伸爪位 66 与缩回位 0 只差 66 < 容差 80，否则永远被跳过 -> 手不伸）。 */
+    if ((st->flags & ACT_STEP_FORCE) != 0U)
+    {
+        return 0U;
+    }
+
     if (st->joint == AJT_CLAW)
     {
         uint16_t cur = 0U;
@@ -2873,7 +2893,8 @@ uint8_t ArmAct_RunCar2Tgt(uint8_t slot, uint8_t tgtPos, uint8_t keepPose)
     actPairStage = 0U;
 
     actSteps[n].joint = AJT_CAR;  actSteps[n].flags = 0U;              actSteps[n].param = actCarS3[(uint8_t)(slot - 1U)]; n++;
-    actSteps[n].joint = AJT_CLAW; actSteps[n].flags = ACT_STEP_PAR;    actSteps[n].param = ARM_CAR_S1;      n++;
+    actSteps[n].joint = AJT_CLAW; actSteps[n].flags = ACT_STEP_PAR | ACT_STEP_FORCE;
+                                                                       actSteps[n].param = ARM_CAR_S1;      n++;
     actSteps[n].joint = AJT_TURN; actSteps[n].flags = ACT_STEP_PAR;    actSteps[n].param = ARM_CAR_M5;      n++;
     actSteps[n].joint = AJT_LIFT; actSteps[n].flags = 0U;              actSteps[n].param = ARM_CAR_M6;      n++;
     actSteps[n].joint = AJT_GRIP; actSteps[n].flags = 0U;              actSteps[n].param = ARM_FIX_S2_CLOSE; n++;
