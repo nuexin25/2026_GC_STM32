@@ -160,7 +160,12 @@ extern "C" {
 #define ACT_GRIP_STALL_MS   250U   /* ★2026-10-28 二轮提速：300 -> 250（≈2~3 次回读一致即判停稳） */
 /* "命令完全没反应"多久才重发（丢帧防护）。太小会把"舵机刚起步的慢启动"误判成丢帧，
  * 反复重发反而让它永远夹不到位。 */
-#define ACT_GRIP_WAIT_MS    400U
+#define ACT_GRIP_WAIT_MS    650U   /* ★【2026-10-29 提速调参】400 -> 650：
+                                      日志里 12 次 `S2 no move -> resend`，每次白等 400ms 才重发
+                                      （舵机启动+回读 `SERVO_MOVE_GAP_MS`(50) + 100ms 读周期，
+                                      400ms 时第一条"动过"的回读常常还没到）。
+                                      放宽到 650ms 后多数夹紧步直接看到位移，不再空重发。
+                                      真丢帧时只是晚 ~250ms 才补发，可靠性不变。 */
 /* ★【2026-10-23 用户要求】"抓取物料时一定要确保抓到了再走下一步"：
    · **夹紧步**（目标 < `ACT_S2_OPEN_MIN`）重发次数提到 3；用尽仍"一次都没动"
      -> **中止本段动作**（绝不带着空爪抬臂，也绝不假装抓到了）；
@@ -409,7 +414,11 @@ extern "C" {
  *     仍按原规则**等 S1 ≤ `ACT_PAIR_TURN_S1_HI` 才发转向**，不提前放行（否则会带着伸出的爪子转头）。
  * 想退回原来的"等确认最多 400ms"：`ACT_SRV_FAST_MS = 400`。 */
 #define ACT_SRV_FAST_MS         120U   /* 舵机步最长等待（ms，0~400）；到位仍立刻放行 */
-#define ACT_SRV_STALL_MS        150U   /* 后台校验"停住/未确认"判定窗（ms，≥ 一个回读周期） */
+#define ACT_SRV_STALL_MS        250U   /* 后台校验"停住/未确认"判定窗（ms，≥ 一个回读周期）
+                                          ★2026-10-29 提速调参 150 -> 250：150ms 时舵机还在
+                                          起步/回读还没刷到就判"停住"-> 后台每步白补发一次
+                                          （整圈 47 次 `srv verify S1 resend`，还占串口总线）。
+                                          250ms ≈ 2~3 个回读周期，真实丢帧仍会补发。 */
 /* ★【2026-10-27 修"偶发丢动作"】"停住"判据的死区（0~1000 域，建议 1~5）。
  *   原来用 `cur != lastPos` 精确比较：回读 ±1 的抖动会不断刷新 stallTick，
  *   后台校验**永远等不到"停住"** -> 不补发 -> 1500ms 后 UNREACHED（=这一步没做成）。 */
@@ -496,7 +505,8 @@ extern "C" {
     ARM_OP_DEF(CAR_PICK,  "CARGET")  /* 从车载盘抓取 */             \
     ARM_OP_DEF(TGT_PLACE, "TGTPUT")  /* 放置到靶位 */               \
     ARM_OP_DEF(TGT_PICK,  "TGTGET")  /* 从靶位抓取 */               \
-    ARM_OP_DEF(STACK,     "STACK")   /* ★堆叠放置到粗加工区圆环（第二批；放在已有料之上） */
+    ARM_OP_DEF(STACK,     "STACK")   /* ★堆叠放置到粗加工区圆环（第二批；放在已有料之上） */ \
+    ARM_OP_DEF(TGT_PLACE2, "TGTPUT2") /* ★2026-10-30：第二批放置独立参数组（流程同 TGTPUT） */
 /* 【注意】新增动作只能**追加在末尾**：actOps[] 对照表是按 ArmOp_t 顺序排列的，
    插在中间会让所有动作错位。 */
 
@@ -528,11 +538,11 @@ typedef enum { ARM_OP_LIST ARM_OP_COUNT } ArmOp_t;
     ARM_CAL(ARM_OP_TT_PICK,   2, 1617, -28196, 898, 500, ARM_UNSET)  /* 转盘2号位 */ \
     ARM_CAL(ARM_OP_TT_PICK,   3, 1314, -28196, 924, 500, ARM_UNSET)  /* 转盘3号位 */ \
     /* ---- 放置靶子 1~3 号位（S2 填"松开"：此处是放料动作）---- */                             \
-    ARM_CAL(ARM_OP_TGT_PLACE, 1, 1772, -62356, 393, 1000, ARM_UNSET)  /* 靶子1号位 */ \
-    ARM_CAL(ARM_OP_TGT_PLACE, 2, 1382, -62356, 188, 1000, ARM_UNSET)  /* 靶子2号位 */ \
+    ARM_CAL(ARM_OP_TGT_PLACE, 1, 1778, -62356, 393, 1000, ARM_UNSET)  /* 靶子1号位 */ \
+    ARM_CAL(ARM_OP_TGT_PLACE, 2, 1379, -62356, 188, 1000, ARM_UNSET)  /* 靶子2号位 */ \
     ARM_CAL(ARM_OP_TGT_PLACE, 3, 1057, -62356, 604, 1000, ARM_UNSET)  /* 靶子3号位 */ \
     /* ---- 抓取靶子 1~3 号位（S2 填"夹紧" = 500）---- */                                      \
-    ARM_CAL(ARM_OP_TGT_PICK,  1, 1772, -62356, 393, 500, ARM_UNSET)  /* 靶子1号位 */ \
+    ARM_CAL(ARM_OP_TGT_PICK,  1, 1782, -62356, 393, 500, ARM_UNSET)  /* 靶子1号位 */ \
     ARM_CAL(ARM_OP_TGT_PICK,  2, 1382, -62356, 188, 500, ARM_UNSET)  /* 靶子2号位 */ \
     ARM_CAL(ARM_OP_TGT_PICK,  3, 1057, -62356, 604, 500, ARM_UNSET)  /* 靶子3号位 */ \
     /* ---- ★堆叠放置到粗加工区 1~3 号圆环（第二批用；S2 填"松开"）---- */                    \
@@ -540,7 +550,15 @@ typedef enum { ARM_OP_LIST ARM_OP_COUNT } ArmOp_t;
      * 差别只在标定值：M6 要比普通放置高一层（叠在已有料上）；参数由用户填写。 */              \
     ARM_CAL(ARM_OP_STACK,     1, 1770, -36865, 450, 1000, ARM_UNSET)  /* 堆叠1号位（参数待填） */ \
     ARM_CAL(ARM_OP_STACK,     2, 1392, -36865, 228, 1000, ARM_UNSET)  /* 堆叠2号位（参数待填） */ \
-    ARM_CAL(ARM_OP_STACK,     3, 1073, -36865, 670, 1000, ARM_UNSET)  /* 堆叠3号位（参数待填） */
+    ARM_CAL(ARM_OP_STACK,     3, 1073, -36865, 670, 1000, ARM_UNSET)  /* 堆叠3号位（参数待填） */ \
+    /* ---- ★【2026-10-30 用户要求】**第二次放置（第二批）独立一套参数** ---- */               \
+    /* 第一批（暂存区）用上面的 `ARM_OP_TGT_PLACE`；第二批用下面这组 `ARM_OP_TGT_PLACE2`，     \
+     * 流程（`flowTgtPlace`）完全一样，只有 M5/M6/S1/S2 四个值独立。                          \
+     * 由 `ArmAct_RunCar2Tgt(..., batch)` 按批次自动选表，`bsp_tt` 的 `SP_SetBatch()` 决定。   \
+     * 初值先复制第一批的值（行为不变），现场直接按第二批实测改这 3 行即可。 */                \
+    ARM_CAL(ARM_OP_TGT_PLACE2,1, 1872, -62356, 393, 1000, ARM_UNSET)  /* 第二批 靶子1号位 */ \
+    ARM_CAL(ARM_OP_TGT_PLACE2,2, 1382, -62356, 188, 1000, ARM_UNSET)  /* 第二批 靶子2号位 */ \
+    ARM_CAL(ARM_OP_TGT_PLACE2,3, 1067, -62356, 604, 1000, ARM_UNSET)  /* 第二批 靶子3号位 */
 
 /* ===================== 对外接口 ===================== */
 
@@ -722,6 +740,8 @@ uint8_t ArmAct_TrayPickPlace(uint8_t slot);
  * @param  keepPose: 1=**最后一个物料**：放完**只松抓就结束**（不收爪、不抬升），
  *                   手臂留在靶位取件姿态，正好接 STORE BACK 的"直接抓"；
  *                   0=放完 [抬升 M6 ‖ 缩回 S1] 同拍，便于回车载抓下一件
+ * @param  batch   : ★【2026-10-30】1=第一批（暂存区，用 `ARM_OP_TGT_PLACE` 参数）；
+ *                   2=第二批（用 `ARM_OP_TGT_PLACE2` 参数）—— 两套参数各自独立标定
  * @retval 1=已启动；0=未启动（号位非法 / 靶位未标定 / 已有动作在跑）
  * @note   把 `CAR_PICK` + `TGT_PLACE` 合并成一条，做到：
  *           抓完 -> [抬升 M6 ‖ 转向靶位 M5 ‖ 舵盘回 0] 同拍；
@@ -729,7 +749,7 @@ uint8_t ArmAct_TrayPickPlace(uint8_t slot);
  *           放完 -> `keepPose=0` 时 [抬升 M6 ‖ 缩回 S1] 同拍；`=1` 时到此为止。
  *         非阻塞，用 `ArmAct_IsBusy()` 判断结束。
  */
-uint8_t ArmAct_RunCar2Tgt(uint8_t slot, uint8_t tgtPos, uint8_t keepPose);
+uint8_t ArmAct_RunCar2Tgt(uint8_t slot, uint8_t tgtPos, uint8_t keepPose, uint8_t batch);
 
 /**
  * @brief  动作主循环节拍（非阻塞）

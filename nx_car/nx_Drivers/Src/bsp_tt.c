@@ -1587,7 +1587,9 @@ void SP_Update(void)
            为什么要合并：用户要求"抓完 [抬升 ‖ 转向靶位 ‖ 舵盘回0] 同拍、
            放料 [伸爪 ‖ 下降] 同拍、放完 [抬升 ‖ 缩回] 同拍"——
            这些跨在原来的 CAR_PICK / TGT_PLACE **两个动作**之间，分开调用做不到。
-           现在由 `ArmAct_RunCar2Tgt(slot, tgt, keepPose)` 一次跑完，结束后才做"记账 + 下一件"。
+           现在由 `ArmAct_RunCar2Tgt(slot, tgt, keepPose, batch)` 一次跑完，结束后才做"记账 + 下一件"。
+           ★【2026-10-30 用户要求】第一批（暂存区）/ 第二批各用一套标定参数：
+             `batch = spBatch`（1 -> `ARM_OP_TGT_PLACE`，2 -> `ARM_OP_TGT_PLACE2`）。
            最后一传 `keepPose=1`：放完只松抓、不收爪不抬升（接 STORE BACK 的"直接抓"）。 */
         case SP_PICK:
             if (spArmOn == 0U)
@@ -1598,12 +1600,12 @@ void SP_Update(void)
                 uint8_t keepPose = ((spRough == 0U) &&
                                     (spSlot == (uint8_t)SP_ITEM_COUNT)) ? 1U : 0U;
 
-                if (ArmAct_RunCar2Tgt(spSlot, spTgtPos, keepPose) != 0U)
+                if (ArmAct_RunCar2Tgt(spSlot, spTgtPos, keepPose, spBatch) != 0U)
                 {
                     spArmOn = 1U;
-                    Debug_Log("SP", "car slot%u -> tgt%u (C2T continuous, last=%u)",
+                    Debug_Log("SP", "car slot%u -> tgt%u (C2T continuous, last=%u, set=%u)",
                               (unsigned int)spSlot, (unsigned int)spTgtPos,
-                              (unsigned int)keepPose);
+                              (unsigned int)keepPose, (unsigned int)spBatch);
                 }
                 break;
             }

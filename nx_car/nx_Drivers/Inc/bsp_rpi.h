@@ -81,11 +81,14 @@ extern "C" {
         · **常规档**（转盘区 `$RCP`，即 `TRAY PICK`）：**7px**；
         · **严格档**（打靶/暂存区 `$SHOT`/`$SHOT2`）：**7px**；
           【2026-10-15 用户要求】"**位移死区 ±7px**" -> 两档统一 7px（原 5px）。
+          【沿革】2026-10-29 曾临时放到 9px 提速；2026-10-30 曾收到 3px（±3px 放置精度）；
+          ★2026-10-31 用户要求"对位精度改回原来的版本" -> **恢复 7px**。
       两档**都只在真正进死区时才判成功**（`bsp_align` 的"末端放宽出口"已于 2026-10-10 删除）。
       ⚠ 若打靶对位始终进不了死区（一直 `FAIL align fail`），先把 `RPI_PX_DEADBAND_STRICT`
       放到 8~10；再检查 `RPI_PX2MM_*` 标定 / `ALIGN_XY_RPM_MIN`（保底速度太小会卡住不动）。 */
 #define RPI_PX_DEADBAND          7      /* 常规档死区（转盘 $RCP 对位用） */
-#define RPI_PX_DEADBAND_STRICT   7      /* 严格档死区（$SHOT/$SHOT2 对位用；7px ≈ 4.6mm） */
+#define RPI_PX_DEADBAND_STRICT   7      /* 严格档死区（$SHOT/$SHOT2 对位用；7px ≈ 4.6mm）
+                                           ★2026-10-31 用户要求恢复原值（3 -> 7）。 */
 #define RPI_PX_MAX               1000   /* 像素钳位上限（协议合法范围 ±1000），单位 px */
 
 /* 帧定界 / 过期 / 超时 */
@@ -431,6 +434,18 @@ void RPi_ReqRp(void);
  *         改发占位码 "---+---+---+---" 并打一条日志提醒（避免发出畸形帧）。
  */
 void RPi_SendCode(const char *task_code);
+
+/**
+ * @brief  ★【2026-10-31 新赛规】**正确抓放计数**上报（`$CNT`）
+ * @param  op: 0=新一轮清零(`$CNT,0`，屏幕"抓0 放0")；1=抓到(`$CNT,1`)；2=放好(`$CNT,2`)
+ * @retval 无
+ * @note   协议《抓取计数协议.md》：视觉端收到即回 `$CNT,<抓>,<放>*XX` 并刷新屏幕下 1/3，
+ *         **本工程只发不管**（回帧可选核对，不在本模块的解析表里，会被静默忽略）。
+ *         校验由 `RPi_SendFrame` 自动算：`CNT,0`=0x45 / `CNT,1`=0x44 / `CNT,2`=0x47。
+ *         发送时机：清零=每轮开始（`QR()` 成功那拍）；抓=夹爪**夹紧确认**之后；
+ *                   放=夹爪**松开且抬升完成**之后（见 bsp_arm_action 的 `actCntPlacePend`）。
+ */
+void RPi_ReqCnt(uint8_t op);
 
 /* ---- 换算配置（供任务层标定）---- */
 

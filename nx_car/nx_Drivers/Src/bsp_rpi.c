@@ -1245,6 +1245,27 @@ void RPi_ReqRcp(void)
 }
 
 /**
+ * @brief  ★【2026-10-31 新赛规】正确抓放计数上报（`$CNT`）
+ * @param  op: 0=清零 / 1=抓+1 / 2=放+1
+ * @retval 无
+ * @note   组帧 `$CNT,<op>`（XOR 自动算：0->45 / 1->44 / 2->47）。
+ *         视觉端收到后立即回 `$CNT,<抓>,<放>*XX`，本工程只看日志、不核对。
+ */
+void RPi_ReqCnt(uint8_t op)
+{
+    char content[12];
+
+    if (op > 2U)
+    {
+        Debug_Log("RPi", "CNT op=%u out of 0~2, not sent", (unsigned)op);
+        return;
+    }
+
+    (void)snprintf(content, sizeof(content), "CNT,%u", (unsigned)op);
+    RPi_SendFrame(content);
+}
+
+/**
  * @brief  发送 $RZ：请求转盘三个位号的位号/颜色
  * @param  无
  * @retval 无

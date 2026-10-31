@@ -23,6 +23,7 @@
 #include "bsp_arm.h"        /* Arm_Enable / Arm_MoveAbsDir / Arm_IsReachDone / Arm_ServoMove ... */
 #include "bsp_servo.h"      /* Servo_GetPos：舵机到位回读 */
 #include "bsp_arm_seq.h"    /* 复用 ARM_SEQ_* 容差/超时/舵机等待（口径与手臂调试页一致） */
+#include "bsp_rpi.h"        /* ★2026-10-31 抓放计数上报 RPi_ReqCnt（$CNT） */
 #include "bsp_debug.h"
 #include <stdio.h>
 
@@ -414,6 +415,7 @@ static const ActOpInfo_t actOps[ARM_OP_COUNT] = {
     ACT_FLOW_ROW(flowTgtPlace, "TGTPUT"),
     ACT_FLOW_ROW(flowTgtPick,  "TGTGET"),
     ACT_FLOW_ROW(flowStack,    "STACK"),   /* ★必须与 ARM_OP_LIST 的顺序一致（追加在末尾） */
+    ACT_FLOW_ROW(flowTgtPlace, "TGTPUT2"), /* ★【2026-10-30】第二批放置：流程同 TGTPUT，参数独立 */
 };
 
 /* ===================== ③ 执行器 ===================== */
@@ -494,6 +496,18 @@ static uint8_t   actGripRetry   = 0U;   /* 本步夹紧已"张开->重夹"次数
 static uint8_t   actGripReopenOn = 0U;  /* 1=正在执行"张开"（重夹的准备阶段） */
 static uint32_t  actGripReopenTick = 0U;/* "张开"开始时刻 */
 static uint8_t   actGripFail    = 0U;   /* 1=夹紧彻底失败（调用方据此停下报 FAIL） */
+
+/* ★【2026-10-31 新赛规】**正确抓放计数**（视觉屏下 1/3 "抓 n 放 n"，协议见 bsp_rpi.h 的 RPi_ReqCnt）：
+   · 夹紧步（S2 目标 < `ACT_S2_OPEN_MIN`）完成 = **抓 +1**（`$CNT,1`），并清掉未上报的"放"；
+   · 松开步完成后**先挂起**，等下一步"抬升 M6"完成才 **放 +1**（`$CNT,2`）
+     —— 严格对应协议"松开 + 抬升之后才算放稳"；
+   · 若松开步就是本动作最后一步（如 C2T 最后一件 keepPose=1），直接上报；
+   · 每段动作开始时清零（`Act_Begin`），避免上一段未上报的"放"串到下一段的抬升上。 */
+static uint8_t   actCntPlacePend = 0U;  /* 1=已松爪，等下一次"抬升完成"再报 放+1 */
+static uint8_t   actCntHold      = 0U;  /* 1=爪里**夹着料**（夹紧步置 1、有效松开步清 0）
+                                           ★必须有它：观察位/取件前都有"空爪张开"步，
+                                           若不判"爪里有没有料"，空张开 + 抬升会被误记成一次"放"
+                                           —— 现场表现就是"屏幕上抓/放反了"（先跳 放1 再 抓1）。 */
 
 /* 丢帧看门狗状态（见 bsp_arm_action.h 的 ACT_RETX_* 说明）。
    为什么单独一组：它**不改变完成判据**，只负责"命令丢了就再发一次"，
@@ -2209,6 +2223,41 @@ static void Act_AdvanceRaw(void)
               Act_JointName(actSteps[actIdx].joint),
               (unsigned int)(HAL_GetTick() - actStepTick));
 
+    /* ★【2026-10-31 新赛规】正确抓放计数上报（`$CNT`，屏幕下 1/3 "抓 n 放 n"）
+       · 夹紧步完成 = 抓到 -> `$CNT,1`，置"爪里有料"，清掉未上报的"放"；
+       · 松开步完成：**只有爪里确实有料**才算"放"（否则是观察位/取件前的空张开，不计数）；
+         - 是最后一步（C2T 最后一件 keepPose=1）-> 立刻 `$CNT,2`；
+         - 否则挂起，等**下一步抬升 M6 完成**再 `$CNT,2`（协议："松开 + 抬升之后才算放稳"）。 */
+    if (actSteps[actIdx].joint == AJT_GRIP)
+    {
+        if (actSteps[actIdx].param < (int32_t)ACT_S2_OPEN_MIN)
+        {
+            actCntHold      = 1U;
+            actCntPlacePend = 0U;
+            RPi_ReqCnt(1U);
+        }
+        else if (actCntHold == 0U)
+        {
+            actCntPlacePend = 0U;       /* 空爪张开：不是"放"，不计数 */
+        }
+        else if ((uint8_t)(actIdx + 1U) >= actStepCount)
+        {
+            actCntHold      = 0U;
+            actCntPlacePend = 0U;
+            RPi_ReqCnt(2U);
+        }
+        else
+        {
+            actCntHold      = 0U;
+            actCntPlacePend = 1U;
+        }
+    }
+    else if ((actCntPlacePend != 0U) && (actSteps[actIdx].joint == AJT_LIFT))
+    {
+        actCntPlacePend = 0U;
+        RPi_ReqCnt(2U);
+    }
+
     /* 本步结束：关掉位置快查，恢复正常 6 拍轮转（否则其它电机的状态不再刷新） */
     Arm_SetFastPoll(0U);
 
@@ -2452,6 +2501,7 @@ static uint8_t Act_Begin(void)
     actRunTick  = actStepTick;    /* 统计整段耗时（结束日志用） */
     actUnreached = 0U;            /* 保障层标志：本次动作重新计 */
     actGripFail  = 0U;            /* ★夹爪失败标志：每段动作重新计（调用方在结束时查它） */
+    actCntPlacePend = 0U;         /* ★抓放计数：不继承上一段"已松爪待上报"的挂起 */
     actGripRetry = 0U;
     actGripReopenOn = 0U;
     actAtTtReady = 0U;            /* ★新动作一开始就**不再**处于观察位（GotoTtReady 会重新置 1） */
@@ -2860,6 +2910,8 @@ uint8_t ArmAct_Park(void)
  * @param  keepPose: 1=**最后一个物料**：放完**只松抓就结束**，不收爪、不抬升
  *                   （手臂留在靶位取件姿态，正好接 STORE BACK 的"直接抓"）；
  *                   0=放完 [M6 抬升 ‖ S1 缩回] 同拍，便于回车载抓下一件
+ * @param  batch   : ★【2026-10-30】1=第一批（暂存区）取 `ARM_OP_TGT_PLACE` 的参数；
+ *                   2=第二批取 `ARM_OP_TGT_PLACE2` 的参数（两套参数独立标定，流程相同）
  * @retval 1=已启动；0=未启动
  * @note   把原来的 `CAR_PICK` + `TGT_PLACE` **两个动作合并成一条**，才能做到：
  *           · 抓完：**M6 单独抬升到位**（物料离盘，★2026-10-24 用户要求），
@@ -2869,23 +2921,28 @@ uint8_t ArmAct_Park(void)
  *             [S1 到车载位 ‖ M5 转车载 ‖ M6 降车载] 接着"边转边降"去抓下一件。
  *         ★【2026-10-23 用户要求】STORE PLACE **最后一个物料松抓就行、手臂不用上台**：
  *           `keepPose=1` 时**不追加**最后两步（抬 M6 + 收 S1），动作到"松手"即结束。
- *         车载姿态用 `ARM_CAR_*`；靶位姿态取 `ARM_OP_TGT_PLACE` 对应行。
+ *         车载姿态用 `ARM_CAR_*`；靶位姿态取 `ARM_OP_TGT_PLACE`（batch=1）/
+ *         `ARM_OP_TGT_PLACE2`（batch=2）对应行 —— 两批各一套参数，互不影响。
  *         规则3（转向前先收爪）本动作**跳过**：S1 由本流程显式安排，
  *         且转向时 S1 已在车载爪位（`ARM_CAR_S1`，接近缩回）/ 缩回 0。
  */
-uint8_t ArmAct_RunCar2Tgt(uint8_t slot, uint8_t tgtPos, uint8_t keepPose)
+uint8_t ArmAct_RunCar2Tgt(uint8_t slot, uint8_t tgtPos, uint8_t keepPose, uint8_t batch)
 {
     const ArmCalRow_t *row;
     uint8_t n = 0U;
+    ArmOp_t op;
 
     if (actState == ACT_RUN)                 { return 0U; }
     if ((slot < 1U) || (slot > 3U))          { return 0U; }
     if ((tgtPos < 1U) || (tgtPos > 3U))      { return 0U; }
 
-    row = Act_FindCal((uint8_t)ARM_OP_TGT_PLACE, tgtPos);
+    /* ★【2026-10-30 用户要求】第一批（暂存区）/ 第二批用**两套独立参数** */
+    op  = (batch == 2U) ? ARM_OP_TGT_PLACE2 : ARM_OP_TGT_PLACE;
+    row = Act_FindCal((uint8_t)op, tgtPos);
     if (Act_IsCalibrated(row) == 0U)
     {
-        Debug_Log("ACT", "C2T%u NOT calibrated -> refused", (unsigned int)tgtPos);
+        Debug_Log("ACT", "C2T%u NOT calibrated -> refused (%s)", (unsigned int)tgtPos,
+                  (batch == 2U) ? "set2" : "set1");
         actState = ACT_ABORT;
         return 0U;
     }

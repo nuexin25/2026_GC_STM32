@@ -1396,6 +1396,8 @@ uint8_t QR(void)
                       (int)Chassis_GetOdomYaw());
 
             RPi_SendCode(code->raw);            /* 把任务码发给树莓派 */
+            /* ★【2026-10-31 新赛规】新一轮开始：抓/放计数清零（屏幕下 1/3 变"抓 0 放 0"） */
+            RPi_ReqCnt(0U);
             qrActive = 0U;
             return 1U;                          /* 本作业完成 */
         }
