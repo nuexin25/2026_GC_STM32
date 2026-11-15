@@ -101,6 +101,8 @@ static uint32_t   ttT0        = 0U;                  /* 转动计时起点 t0（
 static uint32_t   ttCandTick  = 0U;                  /* 候选映射首次出现时刻（用于定 t0） */
 static uint32_t   ttRzRxTick  = 0U;                  /* 已处理过的 `$RZ` 帧时间戳（判"新帧"用） */
 static uint32_t   ttWaitTick  = 0U;                  /* ★>0 = 已在"下一格"待命，等到本时刻（料转到位）再抓 */
+static uint32_t   ttGrabHoldTick = 0U;               /* ★【2026-11-02】颜色确认后的"保持"起点
+                                                        （0=还没开始保持；等满 TT_GRAB_HOLD_MS 才夹紧） */
 static uint32_t   ttCcgTick   = 0U;                  /* ★等待位 `$CCG` 上次发送时刻（单帧快照 -> 周期重发） */
 static uint8_t    ttCcgSent   = 0U;                  /* ★等待位 `$CCG` 已发送次数（0=还没发过，立即发） */
 static uint32_t   ttCcgRxTick = 0U;                  /* ★本次等待位"首次请求前"的应答时间戳（判新应答用） */
@@ -551,6 +553,7 @@ void TT_Init(void)
     ttCandTick   = 0U;
     ttRzRxTick   = 0U;
     ttWaitTick   = 0U;
+    ttGrabHoldTick = 0U;
     ttCcgTick    = 0U;
     ttCcgSent    = 0U;
     ttCcgRxTick  = 0U;
@@ -638,6 +641,7 @@ uint8_t TT_StartWithColors(const uint8_t *colors3)
     ttCandTick   = 0U;
     ttRzRxTick   = 0U;
     ttWaitTick   = 0U;
+    ttGrabHoldTick = 0U;
     ttCcgTick    = 0U;
     ttCcgSent    = 0U;
     ttCcgRxTick  = 0U;
@@ -1018,6 +1022,7 @@ void TT_Update(void)
                     ttArmOn      = 1U;
                     ttCcgArmed   = 0U;  /* ★新的一段行程：颜色等待重新"上锁" */
                     ttArmIdleTick = 0U;
+                    ttGrabHoldTick = 0U;   /* ★保持计时重新开始 */
                     Debug_Log("TT", "item%u goto P%u (TTPREP)%s",
                               (unsigned int)(ttItem + 1U), (unsigned int)ttTargetPos,
                               (ttWaitTick != 0U) ? " -> wait for material" : "");
@@ -1052,6 +1057,7 @@ void TT_Update(void)
                 ttCcgArmed = 1U;
                 ttCcgSent  = 0U;
                 ttCcgTick  = 0U;
+                ttGrabHoldTick = 0U;    /* ★保持计时从"开启等色"这一拍重新计 */
                 if (ttWaitTick != 0U)
                 {
                     Debug_Log("TT", "item%u at wait P%u -> enable color wait",
@@ -1073,6 +1079,22 @@ void TT_Update(void)
                     break;
                 }
             }
+
+            /* ★★【2026-11-02 用户要求】"每个物料等 500ms，不要颜色出现就抓"：
+               颜色已确认（或本条不需要等色）之后，**再保持 `TT_GRAB_HOLD_MS`** 才夹紧，
+               避开"料刚转到位/刚被识别就抓"造成的抓偏、抓边。 */
+            if (ttGrabHoldTick == 0U)
+            {
+                ttGrabHoldTick = HAL_GetTick();
+                Debug_Log("TT", "item%u color ok -> hold %ums before grab",
+                          (unsigned int)(ttItem + 1U), (unsigned int)TT_GRAB_HOLD_MS);
+            }
+            if ((uint32_t)(HAL_GetTick() - ttGrabHoldTick) < (uint32_t)TT_GRAB_HOLD_MS)
+            {
+                break;                  /* 还没保持够：先别抓 */
+            }
+            ttGrabHoldTick = 0U;
+
             ttWaitTick = 0U;
             ttArmOn    = 0U;
             if (ArmAct_IsAborted() != 0U)
@@ -1106,7 +1128,8 @@ void TT_Update(void)
                 Debug_Log("TT", "grab+place slot%u (TRAYPICK)", (unsigned int)slot);
 
                 /* 最后一件已到手：只记"候选"，真正的放行判据（S1 已回 0）在 TT_PLACE 每拍复核 */
-                if (((uint8_t)(ttItem + 1U) >= (uint8_t)TT_ITEM_COUNT) && (ttTailCand == 0U))
+                if ((TT_TAIL_EARLY_EN != 0U) &&
+                    ((uint8_t)(ttItem + 1U) >= (uint8_t)TT_ITEM_COUNT) && (ttTailCand == 0U))
                 {
                     ttTailCand = 1U;
                     Debug_Log("TT", "last item in hand -> tail candidate (wait S1=0)");
@@ -1130,7 +1153,7 @@ void TT_Update(void)
                第一拍就能命中 -> 车立刻开跑，此时爪子还没夹紧、手臂还低在转盘里
                （现场现象："最后一个还没抓到车就跑了"）。所以必须再加：
                `ArmAct_GripHeld()`（料确实夹住） + `ArmAct_LiftAboveSafe()`（M6 已抬高）。 */
-            if ((ttTailCand != 0U) && (ttTailOnly == 0U) &&
+            if ((TT_TAIL_EARLY_EN != 0U) && (ttTailCand != 0U) && (ttTailOnly == 0U) &&
                 (ArmAct_GripHeld() != 0U) && (ArmAct_LiftAboveSafe() != 0U) &&
                 ((ArmAct_S1Retracted() != 0U) || (ArmAct_IsTurning() != 0U)))
             {
@@ -1188,6 +1211,7 @@ void TT_Update(void)
                 ttArmOn     = 0U;
                 ttTargetPos = 0U;               /* 让 TT_PREP 在那一拍按时间重新推算 */
                 ttWaitTick  = 0U;               /* 与位号一起清，等 TT_PREP 重新推算 */
+                ttGrabHoldTick = 0U;            /* ★下一件的"颜色保持"重新计 */
                 ttCcgSent   = 0U;               /* 下一个等待位：颜色反馈从"立即发"重新开始 */
                 ttCcgTick   = 0U;
                 (void)ArmAct_PreSelectSlot(nextSlot);
@@ -1222,7 +1246,13 @@ uint8_t TT_IsFailed(void)
    注意：只作"可以放行"的判据，**不改变 ttState**，TT_Update 仍会把收尾动作跑完。 */
 uint8_t TT_TailOnly(void)
 {
-    return ttTailOnly;
+    /* ★【2026-11-02 用户要求】`TT_TAIL_EARLY_EN = 0` 时恒不放行：
+       必须等 3 件全部放进车载位、手臂整段跑完，车轮才动。 */
+    if ((TT_TAIL_EARLY_EN == 0U) || (ttTailOnly == 0U))
+    {
+        return 0U;
+    }
+    return 1U;
 }
 
 const char *TT_GetStateText(void)
@@ -1587,9 +1617,11 @@ void SP_Update(void)
            为什么要合并：用户要求"抓完 [抬升 ‖ 转向靶位 ‖ 舵盘回0] 同拍、
            放料 [伸爪 ‖ 下降] 同拍、放完 [抬升 ‖ 缩回] 同拍"——
            这些跨在原来的 CAR_PICK / TGT_PLACE **两个动作**之间，分开调用做不到。
-           现在由 `ArmAct_RunCar2Tgt(slot, tgt, keepPose, batch)` 一次跑完，结束后才做"记账 + 下一件"。
-           ★【2026-10-30 用户要求】第一批（暂存区）/ 第二批各用一套标定参数：
-             `batch = spBatch`（1 -> `ARM_OP_TGT_PLACE`，2 -> `ARM_OP_TGT_PLACE2`）。
+           现在由 `ArmAct_RunCar2Tgt(slot, tgt, keepPose, area)` 一次跑完，结束后才做"记账 + 下一件"。
+           ★【2026-10-31 用户要求】参数表按**区域**选（不是按批次）：
+             `area = (spRough != 0) ? 1 : 2`
+               · 1 = 粗加工区（ROUGH PLACE）-> `ARM_OP_TGT_PLACE`
+               · 2 = 暂存区（STORE PLACE，第一批/第二批都是它）-> `ARM_OP_TGT_PLACE2`
            最后一传 `keepPose=1`：放完只松抓、不收爪不抬升（接 STORE BACK 的"直接抓"）。 */
         case SP_PICK:
             if (spArmOn == 0U)
@@ -1599,13 +1631,14 @@ void SP_Update(void)
                    手臂留在靶位取件姿态，正好接 STORE BACK 的"直接抓"。 */
                 uint8_t keepPose = ((spRough == 0U) &&
                                     (spSlot == (uint8_t)SP_ITEM_COUNT)) ? 1U : 0U;
+                uint8_t area     = (spRough != 0U) ? 1U : 2U;
 
-                if (ArmAct_RunCar2Tgt(spSlot, spTgtPos, keepPose, spBatch) != 0U)
+                if (ArmAct_RunCar2Tgt(spSlot, spTgtPos, keepPose, area) != 0U)
                 {
                     spArmOn = 1U;
-                    Debug_Log("SP", "car slot%u -> tgt%u (C2T continuous, last=%u, set=%u)",
+                    Debug_Log("SP", "car slot%u -> tgt%u (C2T continuous, last=%u, %s)",
                               (unsigned int)spSlot, (unsigned int)spTgtPos,
-                              (unsigned int)keepPose, (unsigned int)spBatch);
+                              (unsigned int)keepPose, (area == 2U) ? "STORE" : "ROUGH");
                 }
                 break;
             }
@@ -2040,7 +2073,8 @@ void SB_Update(void)
                抓到手里 = **"关键作业已完成"**。这里**只记"候选"**，放行判据（S1 已回 0）
                留到 `SB_PLACE` **每拍复核**（原因同 TT_：只判一次会被
                "步完成容差 80 vs 放行门限 20"漏掉）。 */
-            if (((uint8_t)(sbCount + 1U) >= (uint8_t)SB_ITEM_COUNT) && (sbTailCand == 0U))
+            if ((SB_TAIL_EARLY_EN != 0U) &&
+                ((uint8_t)(sbCount + 1U) >= (uint8_t)SB_ITEM_COUNT) && (sbTailCand == 0U))
             {
                 sbTailCand = 1U;
                 Debug_Log("SB", "last item in hand -> tail candidate (wait S1=0)");
@@ -2056,7 +2090,7 @@ void SB_Update(void)
                （`T_B1_STO_GO`），手臂并行去"放回车载号位"。
                复核窗口 = 本状态全程：`flowSbPlace` 开头有 rule3 自动插的"收爪"步，
                S1 会在 0 停留到"伸爪"那一步，足够复核上（周期 100ms）。 */
-            if ((sbTailCand != 0U) && (sbTailOnly == 0U) &&
+            if ((SB_TAIL_EARLY_EN != 0U) && (sbTailCand != 0U) && (sbTailOnly == 0U) &&
                 (ArmAct_GripHeld() != 0U) && (ArmAct_LiftAboveSafe() != 0U) &&
                 (ArmAct_S1Retracted() != 0U))
             {
@@ -2132,7 +2166,12 @@ uint8_t SB_IsFailed(void)
    只作"可以放行"的判据，**不改变 sbState**，SB_Update 仍会把"放回车载"跑完。 */
 uint8_t SB_TailOnly(void)
 {
-    return sbTailOnly;
+    /* ★【2026-11-02 用户要求】`SB_TAIL_EARLY_EN = 0` 时恒不放行（等料真正放上车载盘） */
+    if ((SB_TAIL_EARLY_EN == 0U) || (sbTailOnly == 0U))
+    {
+        return 0U;
+    }
+    return 1U;
 }
 
 const char *SB_GetStateText(void)

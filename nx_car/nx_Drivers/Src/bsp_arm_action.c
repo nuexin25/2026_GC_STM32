@@ -509,6 +509,23 @@ static uint8_t   actCntHold      = 0U;  /* 1=爪里**夹着料**（夹紧步置 
                                            若不判"爪里有没有料"，空张开 + 抬升会被误记成一次"放"
                                            —— 现场表现就是"屏幕上抓/放反了"（先跳 放1 再 抓1）。 */
 
+/* ★【2026-10-31 用户要求】**放置档全闭环**开关（见 bsp_arm_action.h 的 ACT_PRECISE_*）：
+   `actPreciseReq` 由各动作入口在 `Act_Begin` 之前置 1，`Act_Begin` 拷到 `actPrecise` 并清零，
+   所以**没置的动作自动是普通档**，不会继承上一段。 */
+static uint8_t   actPreciseReq = 0U;    /* 1=下一段动作按"放置档"跑 */
+static uint8_t   actPrecise    = 0U;    /* 1=当前段动作是放置档（电机必须进严格容差、舵机按回读确认） */
+
+static uint8_t Act_MotorAcc(uint8_t isTurn);   /* ★2026-10-31 放置档加速度（定义见后） */
+
+/* ★【2026-11-02】"松爪前最终到位门"用：最近一次下发的 M5/M6/S1 目标 + 等待计时 */
+static int32_t  actGateTurnTgt = ACT_POS_NONE;
+static int32_t  actGateLiftTgt = ACT_POS_NONE;
+static int32_t  actGateS1Tgt   = 0;
+static uint8_t  actGateIdx     = 0xFFU;   /* 当前"门"对应的步号（换步即重计时） */
+static uint32_t actGateTick    = 0U;
+static uint32_t actGateFixTick = 0U;
+static uint8_t Act_PlaceGateWait(uint32_t now);   /* 定义见后 */
+
 /* 丢帧看门狗状态（见 bsp_arm_action.h 的 ACT_RETX_* 说明）。
    为什么单独一组：它**不改变完成判据**，只负责"命令丢了就再发一次"，
    保证"每一步都真的执行"，同时因为窗口只有 150ms 而不拖慢节奏。 */
@@ -771,7 +788,7 @@ static void Act_TrimService(uint32_t now)
         Arm_ReachClear(addr);
         Arm_MoveAbsDir(addr, t->target,
                        (i == 0U) ? (uint16_t)ARM_TURN_VEL : (uint16_t)ARM_LIFT_VEL,
-                       (i == 0U) ? (uint8_t)ARM_TURN_ACC : (uint8_t)ARM_LIFT_ACC,
+                       (i == 0U) ? Act_MotorAcc(1U) : Act_MotorAcc(0U),
                        (uint8_t)ARM_DIR_AUTO);
     }
 
@@ -1208,8 +1225,9 @@ static void Act_SendStep(const ActStep_t *st)
                覆盖最全；而且精修能一直工作到**真正下发**那一刻为止（多赚一点校正时间）。 */
             Act_TrimClear(ARM_ADDR_TURN);
             Arm_ReachClear(ARM_ADDR_TURN);
+            actGateTurnTgt = st->param;      /* ★2026-11-02 松爪前最终到位门用 */
             Arm_MoveAbsDir(ARM_ADDR_TURN, st->param,
-                           ARM_TURN_VEL, ARM_TURN_ACC, ARM_DIR_AUTO);
+                           ARM_TURN_VEL, Act_MotorAcc(1U), ARM_DIR_AUTO);
             /* 打开"位置快查"：位置回读周期由 6 拍轮转(120ms) 降到 20ms，
                闭环才能在电机停下后几十毫秒内判出"停住/误差"（与 bsp_arm_seq 同一机制）。 */
             Arm_SetFastPoll(ARM_ADDR_TURN);
@@ -1218,8 +1236,9 @@ static void Act_SendStep(const ActStep_t *st)
         case AJT_LIFT:
             Act_TrimClear(ARM_ADDR_LIFT);   /* 同上：本步直接驱动电机6 */
             Arm_ReachClear(ARM_ADDR_LIFT);
+            actGateLiftTgt = st->param;      /* ★2026-11-02 松爪前最终到位门用 */
             Arm_MoveAbsDir(ARM_ADDR_LIFT, st->param,
-                           ARM_LIFT_VEL, ARM_LIFT_ACC, ARM_DIR_AUTO);
+                           ARM_LIFT_VEL, Act_MotorAcc(0U), ARM_DIR_AUTO);
             Arm_SetFastPoll(ARM_ADDR_LIFT);
             break;
 
@@ -1230,6 +1249,7 @@ static void Act_SendStep(const ActStep_t *st)
             /* ★【2026-10-29】记录本命令下发时刻：`Act_S1BelowGate()` 用它要求
                "回读必须晚于这条命令"，避免拿伸出之前的旧回读提前放行转向。 */
             actClawCmdTick = HAL_GetTick();
+            actGateS1Tgt   = (int32_t)tgt;   /* ★2026-11-02 松爪前最终到位门用 */
             Arm_ServoMove(SERVO_ID_CLAW, tgt);
 #if (ACT_SERVO_OPEN_LOOP != 0U)
             /* ★【2026-10-15】登记"后台舵机校验/补发"：本步放行后由它继续确认到位，
@@ -1336,7 +1356,7 @@ static uint8_t Act_GripRetryOrFail(uint32_t now, const char *why, uint16_t cur)
 
             Arm_ReachClear((uint8_t)ARM_ADDR_LIFT);
             Arm_MoveAbsDir((uint8_t)ARM_ADDR_LIFT, lift,
-                           ARM_LIFT_VEL, ARM_LIFT_ACC, ARM_DIR_AUTO);
+                           ARM_LIFT_VEL, Act_MotorAcc(0U), ARM_DIR_AUTO);
             Arm_SetFastPoll((uint8_t)ARM_ADDR_LIFT);
         }
         Debug_Log("ACT", "step%u S2 %s (pos=%u) -> REOPEN + M6 drop %d, retry %u/%u",
@@ -1667,6 +1687,12 @@ static uint8_t Act_ServoDone(const ActStep_t *st, uint32_t now)
         uint8_t  id  = (st->joint == AJT_CLAW) ? SERVO_ID_CLAW : SERVO_ID_GRIP;
         uint16_t cur = 0U;
         int32_t  d;
+        /* ★【2026-10-31】放置档：容差收紧到 ±`ACT_SERVO_PREC_TOL`，并且**必须等到真到位**，
+           不按 120ms 提前放行（最多等 `ACT_SRV_PREC_MS`，超时才放行+告警）。 */
+        uint8_t  looseTol = (actPrecise != 0U) ? (uint8_t)ACT_SERVO_PREC_TOL
+                                               : (uint8_t)ACT_SERVO_LOOSE_TOL;
+        uint32_t fastMs   = (actPrecise != 0U) ? (uint32_t)ACT_SRV_PREC_MS
+                                               : (uint32_t)ACT_SRV_FAST_MS;
 
         /* ---- ① 最快路径：回读（必须是"本次命令之后"、且是**本 ID** 的）已在目标附近 -> 立刻放行 ---- */
         if (Servo_GetPos(id, &cur) != 0U)
@@ -1678,7 +1704,7 @@ static uint8_t Act_ServoDone(const ActStep_t *st, uint32_t now)
                 {
                     d = -d;
                 }
-                if (d <= (int32_t)ACT_SERVO_LOOSE_TOL)
+                if (d <= (int32_t)looseTol)
                 {
                     Act_SrvVerifyClear(id);   /* 已到位：后台不用再管这个舵机 */
                     return 1U;
@@ -1699,8 +1725,16 @@ static uint8_t Act_ServoDone(const ActStep_t *st, uint32_t now)
             return 0U;                  /* 交给 Act_PairTurnKick：S1 到位或 400ms 兜底后才发转向 */
         }
 
-        if ((now - actStepTick) >= (uint32_t)ACT_SRV_FAST_MS)
+        if ((now - actStepTick) >= fastMs)
         {
+            if (actPrecise != 0U)
+            {
+                /* 放置档到点仍未进 ±PREC_TOL：放行但明确告警（不许拖着不动，也不假装到位） */
+                actUnreached = 1U;
+                Debug_Log("ACT", "step%u %s PREC timeout pos=%u tgt=%ld (tol %u) -> release",
+                          (unsigned int)(actIdx + 1U), Act_JointName(st->joint),
+                          (unsigned int)cur, (long)st->param, (unsigned int)ACT_SERVO_PREC_TOL);
+            }
             return 1U;
         }
     }
@@ -1821,6 +1855,133 @@ static uint8_t Act_NearTarget(uint8_t addr, int32_t target, int32_t tol)
 }
 
 /**
+ * @brief  "放行容差倍数"：普通档 = `ACT_MOVE_LOOSE_MULT`(4，差不多就放)；放置档 = **1（必须进严格容差）**
+ * @param  无
+ * @retval 倍数（1 或 ACT_MOVE_LOOSE_MULT）
+ * @note   ★【2026-10-31 用户要求】"放置时手臂各部分做闭环"：放置档下 M5/M6 不再按
+ *         宽容差提前放行，必须真到目标才进下一步（后台精修仍兜底，超时行为不变）。
+ */
+static int32_t Act_MoveLooseMult(void)
+{
+    return (actPrecise != 0U) ? 1 : (int32_t)ACT_MOVE_LOOSE_MULT;
+}
+
+/**
+ * @brief  本段动作用哪个"加速度档"（0~255，越大越缓）
+ * @param  isTurn: 1=电机5（转向），0=电机6（升降）
+ * @retval 电机5：放置档 -> `ACT_PREC_ACC`(80)；普通档 -> `ARM_TURN_ACC`
+ *         电机6：**始终** `ARM_LIFT_ACC`(255)（★2026-10-31 用户明确要求，放置档也不例外）
+ * @note   ★【2026-10-31 用户要求】"放置的时候手臂加速度给 80"——只改转向轴。
+ */
+static uint8_t Act_MotorAcc(uint8_t isTurn)
+{
+    if (isTurn == 0U)
+    {
+        return (uint8_t)ARM_LIFT_ACC;       /* 电机6 固定 255 */
+    }
+    if (actPrecise != 0U)
+    {
+        return (uint8_t)ACT_PREC_ACC;       /* 放置档：电机5 用 80 */
+    }
+    return (uint8_t)ARM_TURN_ACC;
+}
+
+/**
+ * @brief  ★【2026-11-02 用户要求】**松爪前的"最终到位门"**：放置档必须先纠偏再松手
+ * @param  now: 当前时刻
+ * @retval 1=允许松爪（三轴都已在容差内 / 读不到回读 / 已超 `ACT_PLACE_GATE_MS`）
+ *         0=还有残差 -> 已补发纠正命令，本拍**不许松爪**
+ * @note   比对对象是**最近一次下发的目标**（`actGateTurnTgt/LiftTgt/S1Tgt`）：
+ *           · 电机5：|cur−tgt| ≤ `ACT_PLACE_TOL_TURN`；否则 200ms 补发一次绝对位置；
+ *           · 电机6：|cur−tgt| ≤ `ACT_PLACE_TOL_LIFT`；同上；
+ *           · 舵机1：|cur−tgt| ≤ `ACT_PLACE_TOL_S1`；否则 200ms 重发一次舵机命令。
+ *         超时兜底：到 `ACT_PLACE_GATE_MS` 仍未对齐 -> 打 WARN 放行（绝不卡死整段动作）。
+ */
+static uint8_t Act_PlaceGateWait(uint32_t now)
+{
+    uint8_t  ok = 1U;
+    int32_t  d;
+    uint16_t cur = 0U;
+    uint8_t  doFix;
+
+    if (actGateIdx != actIdx)
+    {
+        actGateIdx     = actIdx;
+        actGateTick    = now;
+        actGateFixTick = 0U;
+    }
+
+    doFix = ((now - actGateFixTick) >= 200U) ? 1U : 0U;
+
+    /* 电机5 */
+    if ((actGateTurnTgt != (int32_t)ACT_POS_NONE) && (Arm_IsPosValid((uint8_t)ARM_ADDR_TURN) != 0U))
+    {
+        d = Arm_GetPos((uint8_t)ARM_ADDR_TURN) - actGateTurnTgt;
+        if (d < 0) { d = -d; }
+        if (d > (int32_t)ACT_PLACE_TOL_TURN)
+        {
+            ok = 0U;
+            if (doFix != 0U)
+            {
+                Arm_ReachClear((uint8_t)ARM_ADDR_TURN);
+                Arm_MoveAbsDir((uint8_t)ARM_ADDR_TURN, actGateTurnTgt,
+                               ARM_TURN_VEL, Act_MotorAcc(1U), (uint8_t)ARM_DIR_AUTO);
+            }
+        }
+    }
+
+    /* 电机6 */
+    if ((actGateLiftTgt != (int32_t)ACT_POS_NONE) && (Arm_IsPosValid((uint8_t)ARM_ADDR_LIFT) != 0U))
+    {
+        d = Arm_GetPos((uint8_t)ARM_ADDR_LIFT) - actGateLiftTgt;
+        if (d < 0) { d = -d; }
+        if (d > (int32_t)ACT_PLACE_TOL_LIFT)
+        {
+            ok = 0U;
+            if (doFix != 0U)
+            {
+                Arm_ReachClear((uint8_t)ARM_ADDR_LIFT);
+                Arm_MoveAbsDir((uint8_t)ARM_ADDR_LIFT, actGateLiftTgt,
+                               ARM_LIFT_VEL, Act_MotorAcc(0U), (uint8_t)ARM_DIR_AUTO);
+            }
+        }
+    }
+
+    /* 舵机1（前伸/缩回） */
+    if ((Servo_GetPos((uint8_t)SERVO_ID_CLAW, &cur) != 0U) && (actGateS1Tgt > 0))
+    {
+        d = (int32_t)cur - actGateS1Tgt;
+        if (d < 0) { d = -d; }
+        if (d > (int32_t)ACT_PLACE_TOL_S1)
+        {
+            ok = 0U;
+            if (doFix != 0U)
+            {
+                Arm_ServoMove((uint8_t)SERVO_ID_CLAW, (uint16_t)actGateS1Tgt);
+            }
+        }
+    }
+
+    if (doFix != 0U)
+    {
+        actGateFixTick = now;
+    }
+
+    if (ok == 0U)
+    {
+        if ((now - actGateTick) >= (uint32_t)ACT_PLACE_GATE_MS)
+        {
+            Debug_Log("ACT", "place gate TIMEOUT -> open anyway (step%u)",
+                      (unsigned int)(actIdx + 1U));
+            actUnreached = 1U;
+            return 1U;
+        }
+        return 0U;
+    }
+    return 1U;
+}
+
+/**
  * @brief  ★【2026-10-24 用户要求】"**这里不要犹豫**"：本步目标**现在就已经满足**
  * @param  st: 本步
  * @retval 1=已经到位（可以直接跨步，不用下发、不用等回读/到位帧）；0=还要动
@@ -1861,7 +2022,8 @@ static uint8_t Act_StepAlreadyThere(const ActStep_t *st)
         }
         d = (int32_t)cur - st->param;
         if (d < 0) { d = -d; }
-        return (d <= (int32_t)ACT_SERVO_LOOSE_TOL) ? 1U : 0U;
+        return (d <= (int32_t)((actPrecise != 0U) ? ACT_SERVO_PREC_TOL : ACT_SERVO_LOOSE_TOL))
+               ? 1U : 0U;
     }
 
     if (st->joint == AJT_GRIP)
@@ -1887,19 +2049,20 @@ static uint8_t Act_StepAlreadyThere(const ActStep_t *st)
         }
         d = (int32_t)cur - st->param;
         if (d < 0) { d = -d; }
-        return (d <= (int32_t)ACT_S3_ARRIVE_TOL) ? 1U : 0U;
+        return (d <= (int32_t)((actPrecise != 0U) ? ACT_S3_PREC_TOL : ACT_S3_ARRIVE_TOL))
+               ? 1U : 0U;
     }
 
     if (st->joint == AJT_TURN)
     {
         return Act_NearTarget((uint8_t)ARM_ADDR_TURN, st->param,
-                              (int32_t)ARM_SEQ_TURN_POS_TOL * (int32_t)ACT_MOVE_LOOSE_MULT);
+                              (int32_t)ARM_SEQ_TURN_POS_TOL * Act_MoveLooseMult());
     }
 
     if (st->joint == AJT_LIFT)
     {
         return Act_NearTarget((uint8_t)ARM_ADDR_LIFT, st->param,
-                              (int32_t)ARM_SEQ_LIFT_POS_TOL * (int32_t)ACT_MOVE_LOOSE_MULT);
+                              (int32_t)ARM_SEQ_LIFT_POS_TOL * Act_MoveLooseMult());
     }
 
     return 0U;
@@ -2134,7 +2297,7 @@ static uint8_t Act_StepDoneAt(uint8_t idx, uint32_t now)
     /* ★【2026-10-24 用户要求】带 `ACT_STEP_EARLY` 的步：进 **±`ACT_TURN_EARLY_REL`(100)**
        就算到位（"电机5 转到目标 ±100 内 -> 电机6 下降"）。
        并行组里"转向"是**组员**，由本函数判定，所以提前放行必须写在这里。 */
-    if (((s->flags & ACT_STEP_EARLY) != 0U) &&
+    if ((actPrecise == 0U) && ((s->flags & ACT_STEP_EARLY) != 0U) &&
         (Act_NearTarget(addr, s->param, Act_EarlyMargin(s->joint)) != 0U))
     {
         return 1U;
@@ -2146,9 +2309,9 @@ static uint8_t Act_StepDoneAt(uint8_t idx, uint32_t now)
         return 1U;
     }
     if ((Arm_IsPosValid(addr) != 0U) &&
-        (Act_NearTarget(addr, s->param, tol * (int32_t)ACT_MOVE_LOOSE_MULT) != 0U))
+        (Act_NearTarget(addr, s->param, tol * Act_MoveLooseMult()) != 0U))
     {
-        return 1U;      /* ★宽容差（× ACT_MOVE_LOOSE_MULT）即算组内到位，别让整组等闭环 */
+        return 1U;      /* ★宽容差（普通档 × 4 / 放置档 × 1）即算组内到位，别让整组等闭环 */
     }
     return 0U;
 }
@@ -2502,6 +2665,16 @@ static uint8_t Act_Begin(void)
     actUnreached = 0U;            /* 保障层标志：本次动作重新计 */
     actGripFail  = 0U;            /* ★夹爪失败标志：每段动作重新计（调用方在结束时查它） */
     actCntPlacePend = 0U;         /* ★抓放计数：不继承上一段"已松爪待上报"的挂起 */
+    /* ★【2026-10-31】放置档开关：由入口在调用前用 `actPreciseReq` 指定，未指定=普通档 */
+    actPrecise   = (uint8_t)((ACT_PRECISE_EN != 0U) ? actPreciseReq : 0U);
+    actPreciseReq = 0U;
+    /* ★【2026-11-02】松爪前"最终到位门"复位：目标未知、计时清零 */
+    actGateTurnTgt = ACT_POS_NONE;
+    actGateLiftTgt = ACT_POS_NONE;
+    actGateS1Tgt   = 0;
+    actGateIdx     = 0xFFU;
+    actGateTick    = 0U;
+    actGateFixTick = 0U;
     actGripRetry = 0U;
     actGripReopenOn = 0U;
     actAtTtReady = 0U;            /* ★新动作一开始就**不再**处于观察位（GotoTtReady 会重新置 1） */
@@ -2542,6 +2715,14 @@ static uint8_t Act_StartInternal(ArmOp_t op, uint8_t pos)
     if (op == ARM_OP_CAR_PLACE)
     {
         actSkipRule3 = 1U;
+    }
+
+    /* ★【2026-10-31 用户要求】放置类动作走**放置档全闭环**：
+       电机5/6 必须进严格容差、舵机1/S3 必须回读确认到位，保证落料位置。 */
+    if ((op == ARM_OP_CAR_PLACE) || (op == ARM_OP_TGT_PLACE) ||
+        (op == ARM_OP_TGT_PLACE2) || (op == ARM_OP_STACK))
+    {
+        actPreciseReq = 1U;
     }
 
     return Act_Begin();
@@ -2613,6 +2794,10 @@ uint8_t ArmAct_GotoTtReady(void)
    所以放宽到严格容差的 3 倍 / 2 倍，避免刚跑完就差几脉冲被判"不在观察位"。 */
 #define ACT_READY_TOL_TURN   (ARM_SEQ_TURN_POS_TOL * 3)
 #define ACT_READY_TOL_LIFT   (ARM_SEQ_LIFT_POS_TOL * 2)
+/* ★【2026-11-02 用户要求】"转盘抓取要**等手臂到达等待位**再开启颜色识别"：
+   等待位 = M5 转向 + M6 取料高度 + **舵机1 前伸到位**（`ARM_OP_TT_PICK` 行的 S1）。
+   原来只判 M5/M6，S1 还在伸的过程中就被判"到位" -> 相机提前开始识别。 */
+#define ACT_READY_TOL_S1     30
 
 uint8_t ArmAct_IsAtTtReady(void)
 {
@@ -2642,6 +2827,22 @@ uint8_t ArmAct_IsAtTtPos(uint8_t pos)
        而电机5/6 还在走最后一段，正好就是"手臂还在去等待位途中就抓"的现场现象。 */
     if (Act_NearTarget((uint8_t)ARM_ADDR_TURN, row->cal.m5, ACT_READY_TOL_TURN) == 0U) { return 0U; }
     if (Act_NearTarget((uint8_t)ARM_ADDR_LIFT, row->cal.m6, ACT_READY_TOL_LIFT) == 0U) { return 0U; }
+
+    /* ★【2026-11-02 用户要求】还要确认**舵机1 已经伸到该号位的等待位**：
+       否则"手臂还在伸爪"就被判到位，颜色识别提前开跑。
+       （回读不可用时不做判据 —— 否则舵机读不到会永远到不了，宁可退回旧行为。） */
+    {
+        uint16_t s1 = 0U;
+        int32_t  d;
+
+        if ((Servo_GetPos((uint8_t)SERVO_ID_CLAW, &s1) != 0U) &&
+            (row->cal.s1 >= 0))
+        {
+            d = (int32_t)s1 - row->cal.s1;
+            if (d < 0) { d = -d; }
+            if (d > (int32_t)ACT_READY_TOL_S1) { return 0U; }
+        }
+    }
 
     return 1U;
 }
@@ -2784,6 +2985,8 @@ uint8_t ArmAct_TrayPickPlace(uint8_t slot)
     (void)snprintf(actTitle, sizeof(actTitle), "TRAYPICK%u", (unsigned int)slot);
     actPos = slot;
 
+    actPreciseReq = 1U;            /* ★2026-10-31：本段结尾是"放车载"，按放置档全闭环 */
+
     return Act_Begin();
 }
 
@@ -2910,8 +3113,9 @@ uint8_t ArmAct_Park(void)
  * @param  keepPose: 1=**最后一个物料**：放完**只松抓就结束**，不收爪、不抬升
  *                   （手臂留在靶位取件姿态，正好接 STORE BACK 的"直接抓"）；
  *                   0=放完 [M6 抬升 ‖ S1 缩回] 同拍，便于回车载抓下一件
- * @param  batch   : ★【2026-10-30】1=第一批（暂存区）取 `ARM_OP_TGT_PLACE` 的参数；
- *                   2=第二批取 `ARM_OP_TGT_PLACE2` 的参数（两套参数独立标定，流程相同）
+ * @param  area    : ★【2026-10-31】按**区域**选参数表（不是按批次）：
+ *                   1=粗加工区（`PLACE_ROUGH`）取 `ARM_OP_TGT_PLACE`；
+ *                   2=暂存区（`PLACE_STORE`）取 `ARM_OP_TGT_PLACE2`（两套参数独立标定，流程相同）
  * @retval 1=已启动；0=未启动
  * @note   把原来的 `CAR_PICK` + `TGT_PLACE` **两个动作合并成一条**，才能做到：
  *           · 抓完：**M6 单独抬升到位**（物料离盘，★2026-10-24 用户要求），
@@ -2921,12 +3125,12 @@ uint8_t ArmAct_Park(void)
  *             [S1 到车载位 ‖ M5 转车载 ‖ M6 降车载] 接着"边转边降"去抓下一件。
  *         ★【2026-10-23 用户要求】STORE PLACE **最后一个物料松抓就行、手臂不用上台**：
  *           `keepPose=1` 时**不追加**最后两步（抬 M6 + 收 S1），动作到"松手"即结束。
- *         车载姿态用 `ARM_CAR_*`；靶位姿态取 `ARM_OP_TGT_PLACE`（batch=1）/
- *         `ARM_OP_TGT_PLACE2`（batch=2）对应行 —— 两批各一套参数，互不影响。
+ *         车载姿态用 `ARM_CAR_*`；靶位姿态按**所在区域**取 `ARM_OP_TGT_PLACE`（粗加工区）/
+ *         `ARM_OP_TGT_PLACE2`（暂存区）对应行 —— 两个区域各一套参数，互不影响。
  *         规则3（转向前先收爪）本动作**跳过**：S1 由本流程显式安排，
  *         且转向时 S1 已在车载爪位（`ARM_CAR_S1`，接近缩回）/ 缩回 0。
  */
-uint8_t ArmAct_RunCar2Tgt(uint8_t slot, uint8_t tgtPos, uint8_t keepPose, uint8_t batch)
+uint8_t ArmAct_RunCar2Tgt(uint8_t slot, uint8_t tgtPos, uint8_t keepPose, uint8_t area)
 {
     const ArmCalRow_t *row;
     uint8_t n = 0U;
@@ -2936,13 +3140,13 @@ uint8_t ArmAct_RunCar2Tgt(uint8_t slot, uint8_t tgtPos, uint8_t keepPose, uint8_
     if ((slot < 1U) || (slot > 3U))          { return 0U; }
     if ((tgtPos < 1U) || (tgtPos > 3U))      { return 0U; }
 
-    /* ★【2026-10-30 用户要求】第一批（暂存区）/ 第二批用**两套独立参数** */
-    op  = (batch == 2U) ? ARM_OP_TGT_PLACE2 : ARM_OP_TGT_PLACE;
+    /* ★【2026-10-31 用户要求】粗加工区 / 暂存区用**两套独立参数**（按区域，不按批次） */
+    op  = (area == 2U) ? ARM_OP_TGT_PLACE2 : ARM_OP_TGT_PLACE;
     row = Act_FindCal((uint8_t)op, tgtPos);
     if (Act_IsCalibrated(row) == 0U)
     {
         Debug_Log("ACT", "C2T%u NOT calibrated -> refused (%s)", (unsigned int)tgtPos,
-                  (batch == 2U) ? "set2" : "set1");
+                  (area == 2U) ? "store" : "rough");
         actState = ACT_ABORT;
         return 0U;
     }
@@ -2982,6 +3186,7 @@ uint8_t ArmAct_RunCar2Tgt(uint8_t slot, uint8_t tgtPos, uint8_t keepPose, uint8_
     actPos = slot;                       /* 车载号位（S3 预选/到位判定用） */
 
     actSkipRule3 = 1U;                   /* S1 由本流程显式安排，不插"转向前收爪" */
+    actPreciseReq = 1U;                  /* ★2026-10-31：本段含"放置到靶位"，按放置档全闭环 */
 
     return Act_Begin();
 }
@@ -3118,6 +3323,7 @@ uint8_t ArmAct_SbPlace(uint8_t slot, uint8_t nextTgt)
     actPos = slot;
 
     actSkipRule3 = 1U;            /* S1 由本流程显式安排 */
+    actPreciseReq = 1U;           /* ★2026-10-31：本段是"放回车载"，按放置档全闭环 */
 
     return Act_Begin();
 }
@@ -3507,6 +3713,15 @@ void ArmAct_Update(void)
         }
         actSrvBusWaitTick = 0U;             /* 本步不再等总线 */
 
+        /* ★★【2026-11-02 用户要求】放置档：**松爪（放料）之前必须先把手臂校到位**——
+           电机5 / 电机6 / 舵机1 任一还有残差就先补发纠正命令、继续等，**本拍不松爪**。 */
+        if ((actPrecise != 0U) && (st->joint == AJT_GRIP) &&
+            (st->param >= (int32_t)ACT_S2_OPEN_MIN) &&
+            (Act_PlaceGateWait(now) == 0U))
+        {
+            return;
+        }
+
         Act_SendStep(st);
         actStepSent  = 1U;
         actStepTick  = now;
@@ -3699,27 +3914,31 @@ void ArmAct_Update(void)
         uint16_t curS3  = 0U;
         uint8_t  haveS3 = Servo_GetPos((uint8_t)SERVO_ID_TURNTABLE, &curS3);
         uint32_t el     = now - actStepTick;
+        /* ★【2026-10-31】放置档：S3 到位容差收紧到 ±`ACT_S3_PREC_TOL`，
+           并且**不按 ACT_S3_MOVE_MS 开环放行**，最多等 `ACT_SRV_PREC_MS` 再补发。 */
+        int32_t  s3Tol  = (actPrecise != 0U) ? (int32_t)ACT_S3_PREC_TOL
+                                             : (int32_t)ACT_S3_ARRIVE_TOL;
 
-        /* ① 回读已到目标 ±`ACT_S3_ARRIVE_TOL` -> 立刻放行（预选过的话几乎是秒过） */
+        /* ① 回读已到目标 ±容差 -> 立刻放行（预选过的话几乎是秒过） */
         if (haveS3 != 0U)
         {
             int32_t d = (int32_t)curS3 - st->param;
 
             if (d < 0) { d = -d; }
-            if (d <= (int32_t)ACT_S3_ARRIVE_TOL)
+            if (d <= s3Tol)
             {
                 Act_Advance();
                 return;
             }
         }
-        else if (Act_CarS3AlreadyDone() != 0U)
+        else if ((actPrecise == 0U) && (Act_CarS3AlreadyDone() != 0U))
         {
-            /* 读不到回读：只能按"对位成功时预选过且已转过 ACT_S3_MOVE_MS"放行 */
+            /* 读不到回读：只能按"对位成功时预选过且已转过 ACT_S3_MOVE_MS"放行（仅普通档） */
             Act_Advance();
             return;
         }
 
-        if (el < (uint32_t)ACT_S3_MOVE_MS) { return; }
+        if (el < (uint32_t)((actPrecise != 0U) ? ACT_SRV_PREC_MS : ACT_S3_MOVE_MS)) { return; }
 
         /* ② 到点还没到位 = **丢步** -> 重发一次，再给一个窗口（这是本次修的重点） */
         if (actCarS3Resent == 0U)
@@ -3752,6 +3971,38 @@ void ArmAct_Update(void)
             {
                 return;
             }
+        }
+
+        /* ★★【2026-10-31 用户要求】"放置时手还没完全松，其他就动了"：
+           放置档下**松开步必须确认爪子真的张开**（回读 ≥ 目标 − `ACT_GRIP_OPEN_TOL`）
+           才允许抬升 / 缩爪；最多等 `ACT_GRIP_OPEN_MS`，超时放行并告警（绝不卡死）。 */
+        if ((actPrecise != 0U) && (st->joint == AJT_GRIP) &&
+            (st->param >= (int32_t)ACT_S2_OPEN_MIN))
+        {
+            uint16_t cur = 0U;
+
+            if (Servo_GetPos((uint8_t)SERVO_ID_GRIP, &cur) != 0U)
+            {
+                /* 只认本步命令之后拿到的回读（否则会用命令前的"闭合值"误判） */
+                if ((int32_t)(Servo_GetPosTickById((uint8_t)SERVO_ID_GRIP) - actStepTick) >= 0)
+                {
+                    if ((int32_t)cur >= (st->param - (int32_t)ACT_GRIP_OPEN_TOL))
+                    {
+                        Act_Advance();
+                        return;
+                    }
+                }
+            }
+
+            if ((now - actStepTick) >= (uint32_t)ACT_GRIP_OPEN_MS)
+            {
+                actUnreached = 1U;
+                Debug_Log("ACT", "step%u S2 open timeout pos=%u tgt=%ld -> release",
+                          (unsigned int)(actIdx + 1U), (unsigned int)cur, (long)st->param);
+                Act_Advance();
+                return;
+            }
+            return;                     /* 还没张开：继续等（不许抬臂 / 缩爪） */
         }
 
         /* ★★【2026-10-24 用户要求】"一气呵成"：**已经在目标附近就直接过**，不等新回读。
@@ -3851,7 +4102,7 @@ void ArmAct_Update(void)
 
         if ((Arm_IsReachDone(addr) != 0U) ||
             (Act_NearTarget(addr, st->param,
-                            tol * (int32_t)ACT_MOVE_LOOSE_MULT) != 0U))
+                            tol * Act_MoveLooseMult()) != 0U))
         {
             Act_Advance();
         }
@@ -3861,15 +4112,16 @@ void ArmAct_Update(void)
     {
         uint8_t  addr   = (st->joint == AJT_TURN) ? ARM_ADDR_TURN : ARM_ADDR_LIFT;
         uint16_t mvel   = (st->joint == AJT_TURN) ? ARM_TURN_VEL : ARM_LIFT_VEL;
-        uint8_t  macc   = (st->joint == AJT_TURN) ? (uint8_t)ARM_TURN_ACC : (uint8_t)ARM_LIFT_ACC;
+        uint8_t  macc   = (st->joint == AJT_TURN) ? Act_MotorAcc(1U) : Act_MotorAcc(0U);
         uint8_t  strict = (st->joint == AJT_TURN) ? (uint8_t)ACT_TURN_STRICT_POS
                                                   : (uint8_t)ACT_LIFT_STRICT_POS;
         int32_t  tol    = (st->joint == AJT_TURN) ? (int32_t)ARM_SEQ_TURN_POS_TOL
                                                   : (int32_t)ARM_SEQ_LIFT_POS_TOL;
         uint8_t  done   = 0U;
 
-        /* ★【2026-10-24】`ACT_STEP_EARLY`：进 ±`Act_EarlyMargin()` 就放行下一步 */
-        if (((st->flags & ACT_STEP_EARLY) != 0U) &&
+        /* ★【2026-10-24】`ACT_STEP_EARLY`：进 ±`Act_EarlyMargin()` 就放行下一步
+           ★【2026-10-31】放置档**不提前放行**（必须真转到位，保证落料角度） */
+        if ((actPrecise == 0U) && ((st->flags & ACT_STEP_EARLY) != 0U) &&
             (Act_NearTarget(addr, st->param, Act_EarlyMargin(st->joint)) != 0U))
         {
             if ((Arm_IsPosValid(addr) != 0U) &&
@@ -3921,7 +4173,7 @@ void ArmAct_Update(void)
                     released = 1U;
                 }
                 else if (Act_NearTarget(addr, st->param,
-                                        tol * (int32_t)ACT_MOVE_LOOSE_MULT) != 0U)
+                                        tol * Act_MoveLooseMult()) != 0U)
                 {
                     /* ★【2026-10-24 用户要求】"偏差不是很大就直接放置"：
                        位置进**宽容差**（严格容差 × ACT_MOVE_LOOSE_MULT）也放行，

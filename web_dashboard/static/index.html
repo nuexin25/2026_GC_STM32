@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>nx_car 数据看板</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- 顶部导航栏 -->
+  <header class="topbar">
+    <div class="brand">nx_car 智能搬运机器人 · 数据看板</div>
+    <div class="topbar-status">
+      <label class="com-select">串口
+        <select id="com-select">
+          <option value="">自动探测</option>
+        </select>
+      </label>
+      <button id="sim-btn" class="sim-btn">开启模拟数据</button>
+      <span id="ws-status" class="badge badge-off">WS 未连接</span>
+      <span id="source-status" class="badge badge-off">数据源：未连接</span>
+    </div>
+  </header>
+
+  <!-- 标签页导航 -->
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="overview">状态概览</button>
+    <button class="tab-btn" data-tab="realtime">实时数据</button>
+    <button class="tab-btn" data-tab="history">历史回放</button>
+    <button class="tab-btn" data-tab="logs">日志</button>
+    <button class="tab-btn" data-tab="params">参数</button>
+  </nav>
+
+  <main>
+    <!-- ============ 标签页1：状态概览 ============ -->
+    <section id="tab-overview" class="tab-panel active">
+      <div class="grid overview-grid">
+        <div class="card">
+          <h3>系统状态</h3>
+          <div class="kv"><span>运行时间</span><span id="ov-uptime">00:00:00</span></div>
+          <div class="kv"><span>心跳</span><span id="ov-heartbeat">暂无数据</span></div>
+          <div class="kv"><span>任务码</span><span id="ov-task">暂无数据</span></div>
+          <div class="kv"><span>当前阶段</span><span id="ov-stage">暂无数据</span></div>
+        </div>
+        <div class="card">
+          <h3>最新位姿</h3>
+          <div class="kv"><span>X (mm)</span><span id="ov-x">暂无数据</span></div>
+          <div class="kv"><span>Y (mm)</span><span id="ov-y">暂无数据</span></div>
+          <div class="kv"><span>Yaw (deg)</span><span id="ov-yaw">暂无数据</span></div>
+        </div>
+        <div class="card">
+          <h3>电机状态</h3>
+          <div class="motor-grid">
+            <div class="motor-item" id="motor-1"><span>前左</span><b>暂无数据</b></div>
+            <div class="motor-item" id="motor-2"><span>前右</span><b>暂无数据</b></div>
+            <div class="motor-item" id="motor-3"><span>后左</span><b>暂无数据</b></div>
+            <div class="motor-item" id="motor-4"><span>后右</span><b>暂无数据</b></div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>视觉数据</h3>
+          <div id="ov-vision" class="kv-list muted">暂无数据</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 标签页2：实时数据 ============ -->
+    <section id="tab-realtime" class="tab-panel">
+      <div class="grid realtime-grid">
+        <div class="card chart-card"><h3>IMU Yaw 角</h3><canvas id="chart-yaw"></canvas></div>
+        <div class="card chart-card"><h3>定位轨迹 (XY 俯视)</h3><canvas id="chart-pose"></canvas></div>
+        <div class="card chart-card"><h3>四轮转速</h3><canvas id="chart-motor"></canvas></div>
+        <div class="card chart-card"><h3>视觉数据（最新）</h3><div id="rt-vision" class="kv-list muted">暂无数据</div></div>
+      </div>
+    </section>
+
+    <!-- ============ 标签页3：历史回放 ============ -->
+    <section id="tab-history" class="tab-panel">
+      <div class="card">
+        <h3>历史回放</h3>
+        <div class="form-row">
+          <label>数据类型
+            <select id="hist-type">
+              <option value="imu">IMU Yaw</option>
+              <option value="pose">定位</option>
+              <option value="motor">电机转速</option>
+              <option value="vision">视觉数据</option>
+              <option value="task">任务码</option>
+              <option value="stage">阶段</option>
+            </select>
+          </label>
+          <label>视觉子类型
+            <select id="hist-sub">
+              <option value="">全部</option>
+              <option value="OBS">OBS 障碍物</option>
+              <option value="TRN">TRN 转盘</option>
+              <option value="PLA">PLA 对位</option>
+              <option value="NAV">NAV 航迹</option>
+              <option value="BOX">BOX 物料</option>
+            </select>
+          </label>
+          <label>开始时间
+            <input type="datetime-local" id="hist-start">
+          </label>
+          <label>结束时间
+            <input type="datetime-local" id="hist-end">
+          </label>
+          <button id="hist-load">加载</button>
+          <button id="hist-export">导出 CSV</button>
+        </div>
+        <canvas id="chart-history"></canvas>
+      </div>
+    </section>
+
+    <!-- ============ 标签页4：日志 ============ -->
+    <section id="tab-logs" class="tab-panel">
+      <div class="card log-card">
+        <h3>日志流</h3>
+        <div class="form-row">
+          <label>Tag 过滤
+            <select id="log-tag" multiple size="1">
+              <option value="">全部</option>
+            </select>
+          </label>
+          <label>关键字
+            <input type="text" id="log-keyword" placeholder="搜索关键字">
+          </label>
+          <button id="log-pause">暂停</button>
+          <button id="log-clear">清空</button>
+        </div>
+        <div id="log-list" class="log-list"></div>
+      </div>
+    </section>
+
+    <!-- ============ 标签页5：参数（预留） ============ -->
+    <section id="tab-params" class="tab-panel">
+      <div class="card">
+        <h3>赛题参数（预留）</h3>
+        <p class="muted">暂未开放，待固件支持参数下发功能。</p>
+        <table class="param-table">
+          <thead><tr><th>参数名</th><th>当前值</th><th>说明</th><th>状态</th></tr></thead>
+          <tbody>
+            <tr><td>NAV_POS_VEL</td><td>60</td><td>导航位置模式速度（车轮 RPM）</td><td class="muted">暂未开放</td></tr>
+            <tr><td>MEC_ACC</td><td>30</td><td>加减速度档</td><td class="muted">暂未开放</td></tr>
+            <tr><td>NAV_POS_ACC</td><td>30</td><td>导航加减速度档</td><td class="muted">暂未开放</td></tr>
+            <tr><td>WHEEL_DIAMETER_MM</td><td>318</td><td>轮径</td><td class="muted">暂未开放</td></tr>
+            <tr><td>CHS_DIST_MM</td><td>500</td><td>直行目标距离</td><td class="muted">暂未开放</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- 本地化 Chart.js（离线可用） -->
+  <script src="/static/chart.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -295,7 +295,9 @@ void Mission_OdomZero(void);
 
 #define MNV_TURN_KP              3.5f     /* 原地转：位置 P（dps per deg） */
 #define MNV_TURN_KD              0.0f     /* 原地转：角速度阻尼（dps per dps），0=纯 P */
-#define MNV_TURN_MAX_DPS         240.0f   /* 原地转：角速度上限（★2026-10-28 二轮提速：200 -> 240） */
+#define MNV_TURN_MAX_DPS         200.0f   /* 原地转：角速度上限（★2026-10-31 用户要求"降点速度"：
+                                             240 -> 200，减小任务点原地转时车体扫过的边缘，
+                                             避免蹭禁行区；实测每 90° 只多 ~0.15s） */
 #define MNV_TURN_ACC_DPS2        1500.0f  /* 原地转：制动包络 */
 #define MNV_TURN_MIN_DPS         10.0f
 #define MNV_TURN_NEAR_DEG        10.0f    /* ★末端减速带：剩余小于它…（★2026-10-28：14 -> 10） */
@@ -332,8 +334,13 @@ void Mission_OdomZero(void);
 #define MNV_ARC_YMX_DPS          150.0f   /* ★弧线角速度上限 dps：窗口内要转完 90°，太小会转不完 */
 #define MNV_ARC_MIN_DEG          5.0f     /* 转角小于它不走弧线（留给 ROT，免得来回修） */
 #define MNV_ARC_MIN_MM           400.0f   /* ★段长小于它不走弧线（太短转不过来，前馈会爆） */
-#define MNV_ARC_WIN_MM           700.0f   /* ★弧线窗口 mm：只在最后这么长内转（前段全速走直线）
-                                             （改大 = 转得更平缓、但跑偏累积更久；改小 = 转得更急） */
+#define MNV_ARC_WIN_MM           500.0f   /* ★弧线窗口 mm：只在最后这么长内转（前段全速走直线）
+                                             （改大 = 转得更平缓、但跑偏累积更久；改小 = 转得更急）
+                                             ★2026-10-31 用户要求：**到任务点那次转弯时机延后**
+                                             （车体边缘会蹭禁行区）700 -> 500：直线多走 200mm 再开始
+                                             带弧，切弯更靠后、不容易压到弯内侧的禁行区。
+                                             ⚠ 窗口变小 -> 同样 90° 需要更大偏航角速度，可能转不完，
+                                               剩余角度由随后的 ROT 原地补齐（不影响到位精度）。 */
 #define MNV_ARC_FIX_MM           250.0f   /* ★窗口末段 mm：把航向参考按里程计绝对朝向收口，
                                              补掉 IMU 零漂造成的"少转 2~3°"，到点即真值（ROT 不用再补） */
 

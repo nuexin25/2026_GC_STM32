@@ -1,0 +1,12 @@
+# NX-CAR 对位自动调参最优（src=RCP, 代价=1499.0）
+ALNCFG src=RCP kp=160 ki=0 kd=13 rpm=230 wheel=40 ykp=200 yki=0 ykd=15 yrpm=120
+
+kp=0.1600
+ki=0.0000
+kd=0.0130
+rpmMax=23.0000
+wheelMax=40.0000
+ykp=0.2000
+yki=0.0000
+ykd=0.0150
+yrpmMax=12.0000

@@ -1,0 +1,13 @@
+# nx_car 本地数据看板 依赖清单
+# 安装：pip install -r requirements.txt
+# 说明：
+#   Flask        - 轻量 Web 框架
+#   flask-sock   - 原生 WebSocket 支持（比 flask-socketio 更轻，无额外协议依赖，
+#                  适合本项目"单机实时推送"的简单场景）
+#   simple-websocket - flask-sock 的底层依赖
+#   pyserial     - 串口读写
+
+Flask>=2.3
+flask-sock>=0.7.0
+simple-websocket>=0.10.0
+pyserial>=3.5

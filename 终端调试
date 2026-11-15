@@ -1,0 +1,11 @@
+if ($p -and $p.IsOpen) { $p.Close(); $p.Dispose() }//关闭com8端口
+
+
+
+$p = New-Object System.IO.Ports.SerialPort COM8,115200,None,8,One
+$p.ReadTimeout = 1000
+$p.Open()
+Write-Host "COM8 opened @115200-8-N-1, press Ctrl+C to stop"
+while ($true) {
+  try { Write-Host ($p.ReadLine()) } catch {}
+} //打开com8端口

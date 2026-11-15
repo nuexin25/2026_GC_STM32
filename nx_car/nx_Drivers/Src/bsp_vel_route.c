@@ -93,21 +93,21 @@ static const VrStep_t vrSteps[] =
     { VR_TASK,   0,     0,    0, VR_TASK_RGHPLACE_B1, "B1 RHGP" },
 
     /* 第二批：原料区取 3 件 */
-    { VR_GO,  1990,  -2007,    0, 0, "B2 T-GO" },
+    { VR_GO,  1970,  -2007,    0, 0, "B2 T-GO" },
     { VR_ROT,    0,     0,  90, 0, "B2 T-R0" },
     { VR_GO,  1940,  -1012,    0, 0, "B2 T-IN" },
     { VR_TASK,   0,     0,    0, VR_TASK_PICK_B2, "B2 PICK" },
 
     /* 第二批：粗加工区放置 -> 取回 -> 暂存区码垛 */
-    { VR_GO,  1850,  -992,    0, 0, "B2 R-BK" },
+    { VR_GO,  1850,  -962,    0, 0, "B2 R-BK" },
     { VR_ROT,    0,      0,  180, 0, "B2 R-90" },
-    { VR_GO,   250,  -1022,    0, 0, "B2 RGH"  },
+    { VR_GO,   250,  -982,    0, 0, "B2 RGH"  },
     { VR_ROT,    0,     0,   -90, 0, "B2 R-180" },
     { VR_TASK,   0,     0,    0, VR_TASK_PLACE_B2, "B2 PLACE" },
     { VR_TASK,   0,     0,    0, VR_TASK_PBACK_B2, "B2 PBACK" },
-    { VR_GO,   130, -1817,    0, 0, "B2 TOST" },
+    { VR_GO,   130, -1767,    0, 0, "B2 TOST" },
     { VR_ROT,    0,     0,   180, 0, "B2 T-R90" },
-    { VR_GO,  1042, -1817,    0, 0, "B2 TST2" },
+    { VR_GO,  1052, -1797,    0, 0, "B2 TST2" },
     { VR_TASK,   0,     0,    0, VR_TASK_STACK_B2, "B2 STACK" },
 
     /* 返程（原来这里有一段零距离 GO，已删） */
@@ -115,8 +115,8 @@ static const VrStep_t vrSteps[] =
 		{ VR_ROT,    0,     0,    -90, 0, "B2 S-R0" },
 
     /* 收尾 */
-    { VR_GO,    250,    -100,    0, 0, "HOME R"  },
-    { VR_GO,     0,     -100,    0, 0, "HOME GO" },
+    { VR_GO,    250,    -0,    0, 0, "HOME R"  },
+    { VR_GO,     20,     -0,    0, 0, "HOME GO" },
     { VR_TASK,   0,     0,    0, VR_TASK_STAT, "STAT" },
 };
 

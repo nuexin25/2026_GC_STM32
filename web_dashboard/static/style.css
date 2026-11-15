@@ -1,0 +1,210 @@
+/* nx_car 数据看板 —— 浅色主题 */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #eef1f5;
+  --panel: #ffffff;
+  --panel-2: #f5f7fa;
+  --border: #e2e6ec;
+  --text: #2b3440;
+  --muted: #8a94a6;
+  --accent: #2f7fe0;
+  --ok: #22a06b;
+  --warn: #d9822b;
+  --bad: #d64545;
+}
+
+body {
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+/* 顶部栏 */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.brand { font-size: 18px; font-weight: 600; }
+.topbar-status { display: flex; gap: 10px; }
+
+.badge {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 13px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+.badge-off { color: var(--muted); }
+.badge-on { color: #fff; background: var(--ok); border-color: var(--ok); }
+.badge-sim { color: #fff; background: var(--warn); border-color: var(--warn); }
+
+/* COM 口选择 */
+.com-select { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.com-select select {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+/* 模拟数据开关按钮 */
+.sim-btn {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.sim-btn.on {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #fff;
+}
+
+/* 标签页导航 */
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 20px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.tab-btn {
+  padding: 10px 18px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 15px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom: 2px solid var(--accent);
+}
+
+main { padding: 20px; }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* 卡片网格 */
+.grid { display: grid; gap: 16px; }
+.overview-grid { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.realtime-grid { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.card h3 { font-size: 15px; margin-bottom: 12px; color: var(--accent); }
+
+/* 键值对 */
+.kv {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.kv span:first-child { color: var(--muted); }
+.kv span:last-child { font-weight: 600; }
+
+.kv-list { font-size: 14px; }
+.kv-list .kv { border-bottom: 1px solid var(--border); }
+
+/* 视觉数据卡片：固定最小高度，避免不同视觉类型行数不同导致盒子跳动 */
+#ov-vision, #rt-vision { min-height: 168px; }
+
+/* 电机卡片 */
+.motor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.motor-item {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  text-align: center;
+}
+.motor-item span { display: block; color: var(--muted); font-size: 13px; }
+.motor-item b { display: block; margin-top: 6px; font-size: 18px; }
+.motor-item.ok b { color: var(--ok); }
+.motor-item.bad b { color: var(--bad); }
+
+/* 图表卡片 */
+.chart-card canvas { max-height: 260px; width: 100%; }
+
+/* 表单 */
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-end;
+  margin-bottom: 14px;
+}
+.form-row label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.form-row select, .form-row input {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+}
+.form-row button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.form-row button:hover { opacity: 0.9; }
+
+/* 日志流 */
+.log-card { display: flex; flex-direction: column; }
+.log-list {
+  height: 60vh;
+  overflow-y: auto;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.log-line { white-space: pre-wrap; word-break: break-all; }
+.log-line .log-tag { color: var(--accent); font-weight: 600; }
+.log-line .log-time { color: var(--muted); margin-right: 8px; }
+
+/* 参数表 */
+.param-table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 10px; }
+.param-table th, .param-table td {
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  text-align: left;
+}
+.param-table th { background: var(--panel-2); color: var(--accent); }
+
+.muted { color: var(--muted); }
+
+/* 响应式 */
+@media (max-width: 700px) {
+  .realtime-grid { grid-template-columns: 1fr; }
+  .tabs { overflow-x: auto; }
+}
